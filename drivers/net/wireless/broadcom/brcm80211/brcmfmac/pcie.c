@@ -113,6 +113,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_4378_CHIP_ID, 0x0000000F, 4378B1), /* revision ID 3 */
 	BRCMF_FW_ENTRY(BRCM_CC_4378_CHIP_ID, 0xFFFFFFE0, 4378B3), /* revision ID 5 */
 	BRCMF_FW_ENTRY(BRCM_CC_4387_CHIP_ID, 0xFFFFFFFF, 4387C2), /* revision ID 7 */
+	BRCMF_FW_ENTRY(CY_CC_54591_CHIP_ID, 0xFFFFFFFF, 54591),
 };
 
 #define BRCMF_PCIE_FW_UP_TIMEOUT		5000 /* msec */
@@ -2513,8 +2514,14 @@ brcmf_pcie_prepare_fw_request(struct brcmf_pciedev_info *devinfo)
 		{ ".clm_blob", devinfo->clm_name },
 		{ ".txcap_blob", devinfo->txcap_name },
 	};
+	u32 chip;
 
-	fwreq = brcmf_fw_alloc_request(devinfo->ci->chip, devinfo->ci->chiprev,
+	if (devinfo->ci->chip == CY_CC_54591_CHIP_ID &&
+	    devinfo->pdev->device == CY_PCIE_54591_DEVICE_ID)
+		chip = CY_CC_54591_CHIP_ID;
+	else
+		chip = devinfo->ci->chip;
+	fwreq = brcmf_fw_alloc_request(chip, devinfo->ci->chiprev,
 				       brcmf_pcie_fwnames,
 				       ARRAY_SIZE(brcmf_pcie_fwnames),
 				       fwnames, ARRAY_SIZE(fwnames));
