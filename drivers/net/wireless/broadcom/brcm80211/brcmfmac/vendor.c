@@ -286,7 +286,7 @@ const struct wiphy_vendor_command brcmf_vendor_cmds[] = {
 		.maxattr = IFX_VENDOR_ATTR_TWT_MAX
 	},
 	{
-		IFX_SUBCMD(OCE_ENABLE,
+		IFX_SUBCMD(OCE,
 			   (WIPHY_VENDOR_CMD_NEED_WDEV |
 				WIPHY_VENDOR_CMD_NEED_NETDEV),
 			VENDOR_CMD_RAW_DATA,
@@ -300,7 +300,7 @@ const struct wiphy_vendor_command brcmf_vendor_cmds[] = {
 			ifx_cfg80211_vndr_cmds_bsscolor)
 	},
 	{
-		IFX_SUBCMD(RANDMAC,
+		IFX_SUBCMD(RAND_MAC,
 			   (WIPHY_VENDOR_CMD_NEED_WDEV |
 				WIPHY_VENDOR_CMD_NEED_NETDEV),
 			VENDOR_CMD_RAW_DATA,
