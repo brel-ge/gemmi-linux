@@ -542,4 +542,6 @@ s32 brcmf_update_pmksa(struct brcmf_cfg80211_info *cfg,
 		       struct brcmf_if *ifp, const u8 *bssid,
 		       const u8 *pmkid, enum brcmf_pmksa_action action);
 void brcmf_cfg80211_update_proto_addr_mode(struct wireless_dev *wdev);
+int ifx_vndr_cmdstr_hashtbl_init(void);
+void ifx_vndr_cmdstr_hashtbl_deinit(void);
 #endif /* BRCMFMAC_CFG80211_H */
