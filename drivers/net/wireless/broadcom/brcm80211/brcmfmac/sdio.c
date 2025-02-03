@@ -5814,7 +5814,7 @@ fail:
 /* Detach and free everything */
 void brcmf_sdio_remove(struct brcmf_sdio *bus)
 {
-#ifdef CONFIG_BRCMFMAC_BT_SHARED_SDIO
+#if defined(CONFIG_BRCMFMAC_BT_SHARED_SDIO) || defined(CONFIG_INFFMAC_BT_SHARED_SDIO)
 	struct brcmf_bus *bus_if = bus->sdiodev->bus_if;
 #endif
 	u32 reg_val, read_reg;
@@ -5877,10 +5877,8 @@ void brcmf_sdio_remove(struct brcmf_sdio *bus)
 						 * to be set for SDIO reset
 						 */
 						reg_val |= SDIO_CCCR_BRCM_CARDCTRL_WLANRESET;
-#ifdef CONFIG_BRCMFMAC_BT_SHARED_SDIO
 						if (inf_btsdio_set_bt_reset(bus_if))
 							reg_val |= SDIO_CCCR_BRCM_CARDCTRL_BTRESET;
-#endif
 						brcmf_sdiod_func0_wb(bus->sdiodev,
 								     SDIO_CCCR_BRCM_CARDCTRL,
 								     reg_val, &err);
@@ -5937,10 +5935,8 @@ void brcmf_sdio_remove(struct brcmf_sdio *bus)
 									       SDIO_CCCR_BRCM_CARDCTRL,
 									       &err);
 						reg_val |= SDIO_CCCR_BRCM_CARDCTRL_WLANRESET;
-#ifdef CONFIG_BRCMFMAC_BT_SHARED_SDIO
                                                 if (inf_btsdio_set_bt_reset(bus_if))
                                                         reg_val |= SDIO_CCCR_BRCM_CARDCTRL_BTRESET;
-#endif
 						brcmf_sdiod_func0_wb(sdiodev,
 								     SDIO_CCCR_BRCM_CARDCTRL,
 								     reg_val, &err);
