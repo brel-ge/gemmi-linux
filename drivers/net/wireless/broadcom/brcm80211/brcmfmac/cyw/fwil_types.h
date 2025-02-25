@@ -59,6 +59,29 @@ struct brcmf_auth_req_status_le {
 };
 
 /**
+ * struct brcmf_auth_req_status_info_le_v2 - version 2 external auth request
+ *
+ * @version: structure version
+ * @len: structure length
+ * @flags: flags for external auth status
+ * @peer_mac: peer MAC address
+ * @ssid_len: length of SSID
+ * @ssid: SSID characters
+ * @pmkid: PMKSA identifier
+ * @bss_info_le: optional BSS information for the roaming target
+ */
+struct brcmf_auth_req_status_info_le_v2 {
+	__le16 version;
+	__le16 len;
+	__le16 flags;
+	u8 peer_mac[ETH_ALEN];
+	__le32 ssid_len;
+	u8 ssid[IEEE80211_MAX_SSID_LEN];
+	u8 pmkid[WLAN_PMKID_LEN];
+	struct brcmf_bss_info_le bss_info_le[];
+};
+
+/**
  * struct brcmf_mf_params_le - management frame parameters for mgmt_frame iovar
  *
  * @version: version of the iovar
@@ -84,4 +107,3 @@ struct brcmf_mf_params_le {
 };
 
 #endif /* CYW_FWIL_TYPES_H_ */
-

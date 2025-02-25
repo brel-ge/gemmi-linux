@@ -2,11 +2,13 @@
 /*
  * Copyright (c) 2022 Broadcom Corporation
  */
+#include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <core.h>
 #include <bus.h>
+#include <cfg80211.h>
 #include <fwvid.h>
 #include <fwil.h>
 #include <fweh.h>
@@ -256,27 +258,81 @@ brcmf_cyw_notify_ext_auth_req(struct brcmf_if *ifp,
 			      const struct brcmf_event_msg *e, void *data)
 {
 	struct brcmf_pub *drvr = ifp->drvr;
+	struct brcmf_cfg80211_info *cfg = drvr->config;
 	struct cfg80211_external_auth_params params;
 	struct brcmf_auth_req_status_le *auth_req =
 		(struct brcmf_auth_req_status_le *)data;
+	struct brcmf_auth_req_status_info_le_v2 *auth_req_v2;
+	struct brcmf_bss_info_le *bi;
+	u32 bss_len;
 	s32 err = 0;
 
 	brcmf_dbg(INFO, "Enter: event %s (%d) received\n",
 		  brcmf_fweh_event_name(e->event_code), e->event_code);
 
-	if (e->datalen < sizeof(*auth_req)) {
-		bphy_err(drvr, "Event %s (%d) data too small. Ignore\n",
-			 brcmf_fweh_event_name(e->event_code), e->event_code);
-		return -EINVAL;
-	}
-
 	memset(&params, 0, sizeof(params));
 	params.action = NL80211_EXTERNAL_AUTH_START;
 	params.key_mgmt_suite = WLAN_AKM_SUITE_SAE;
 	params.status = WLAN_STATUS_SUCCESS;
-	params.ssid.ssid_len = min_t(u32, 32, le32_to_cpu(auth_req->ssid_len));
-	memcpy(params.ssid.ssid, auth_req->ssid, params.ssid.ssid_len);
-	memcpy(params.bssid, auth_req->peer_mac, ETH_ALEN);
+
+	if (drvr->wlc_ver.wlc_ver_major > BRCMF_AUTH_STATUS_V2_FW_MAJOR ||
+	    (drvr->wlc_ver.wlc_ver_major == BRCMF_AUTH_STATUS_V2_FW_MAJOR &&
+	     drvr->wlc_ver.wlc_ver_minor >= BRCMF_AUTH_STATUS_V2_FW_MINOR)) {
+		auth_req_v2 = data;
+		if (e->datalen < sizeof(*auth_req_v2)) {
+			bphy_err(drvr, "External auth v2 event data too small\n");
+			return -EINVAL;
+		}
+
+		if (e->datalen > sizeof(*auth_req_v2)) {
+			if (e->datalen < sizeof(*auth_req_v2) + sizeof(*bi)) {
+				bphy_err(drvr,
+					 "External auth v2 BSS data too small\n");
+				return -EINVAL;
+			}
+
+			bi = auth_req_v2->bss_info_le;
+			bss_len = le32_to_cpu(bi->length);
+			if (bss_len < sizeof(*bi) ||
+			    bss_len > e->datalen - sizeof(*auth_req_v2)) {
+				bphy_err(drvr,
+					 "External auth v2 invalid BSS length %u\n",
+					 bss_len);
+				return -EINVAL;
+			}
+
+			err = brcmf_inform_single_bss(cfg, bi);
+			if (err) {
+				bphy_err(drvr,
+					 "Failed to update BSS info: err=%d\n",
+					 err);
+				return err;
+			}
+		}
+
+		/* Allow cfg80211 to publish the roaming target scan result. */
+		msleep(10);
+		params.ssid.ssid_len =
+			min_t(u32, IEEE80211_MAX_SSID_LEN,
+			      le32_to_cpu(auth_req_v2->ssid_len));
+		memcpy(params.ssid.ssid, auth_req_v2->ssid,
+		       params.ssid.ssid_len);
+		memcpy(params.bssid, auth_req_v2->peer_mac, ETH_ALEN);
+	} else {
+		if (e->datalen < sizeof(*auth_req)) {
+			bphy_err(drvr, "Event %s (%d) data too small. Ignore\n",
+				 brcmf_fweh_event_name(e->event_code),
+				 e->event_code);
+			return -EINVAL;
+		}
+
+		params.ssid.ssid_len =
+			min_t(u32, IEEE80211_MAX_SSID_LEN,
+			      le32_to_cpu(auth_req->ssid_len));
+		memcpy(params.ssid.ssid, auth_req->ssid,
+		       params.ssid.ssid_len);
+		memcpy(params.bssid, auth_req->peer_mac, ETH_ALEN);
+	}
 
 	err = cfg80211_external_auth_request(ifp->ndev, &params, GFP_KERNEL);
 	if (err)

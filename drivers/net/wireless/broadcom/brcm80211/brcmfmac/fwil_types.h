@@ -15,6 +15,9 @@
 #define BRCMF_AF_PARAM_V2_FW_MAJOR 13
 #define BRCMF_AF_PARAM_V2_FW_MINOR 2
 
+#define BRCMF_AUTH_STATUS_V2_FW_MAJOR 13
+#define BRCMF_AUTH_STATUS_V2_FW_MINOR 3
+
 /* ARP Offload feature flags for arp_ol iovar */
 #define BRCMF_ARP_OL_AGENT		0x00000001
 #define BRCMF_ARP_OL_SNOOP		0x00000002

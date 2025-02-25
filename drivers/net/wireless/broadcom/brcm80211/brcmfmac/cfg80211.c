@@ -4020,8 +4020,8 @@ done:
 	return err;
 }
 
-static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
-				   struct brcmf_bss_info_le *bi)
+s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
+			    struct brcmf_bss_info_le *bi)
 {
 	struct wiphy *wiphy = cfg_to_wiphy(cfg);
 	struct brcmf_pub *drvr = cfg->pub;
@@ -4091,6 +4091,7 @@ static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
 
 	return 0;
 }
+BRCMF_EXPORT_SYMBOL_GPL(brcmf_inform_single_bss);
 
 static struct brcmf_bss_info_le *
 next_bss_le(struct brcmf_scan_results *list, struct brcmf_bss_info_le *bss)
