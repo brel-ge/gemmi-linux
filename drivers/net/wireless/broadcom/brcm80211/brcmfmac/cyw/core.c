@@ -118,6 +118,7 @@ int brcmf_cyw_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 	__le16 hw_ch;
 	struct brcmf_mf_params_le *mf_params;
 	u32 mf_params_len;
+	u32 packet_id;
 	s32 ready;
 
 	brcmf_dbg(TRACE, "Enter\n");
@@ -159,7 +160,11 @@ int brcmf_cyw_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 
 	memcpy(&mf_params->da[0], &mgmt->da[0], ETH_ALEN);
 	memcpy(&mf_params->bssid[0], &mgmt->bssid[0], ETH_ALEN);
-	mf_params->packet_id = cpu_to_le32(*cookie);
+	packet_id = lower_32_bits((unsigned long)mf_params->data);
+	if (!packet_id)
+		packet_id = 1;
+	*cookie = packet_id;
+	mf_params->packet_id = cpu_to_le32(packet_id);
 	unsafe_memcpy(mf_params->data, &buf[DOT11_MGMT_HDR_LEN],
 		      le16_to_cpu(mf_params->len),
 		      /* Allocation includes the variable-length data. */);
