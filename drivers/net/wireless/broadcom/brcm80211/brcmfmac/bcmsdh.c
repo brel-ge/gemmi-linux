@@ -1349,7 +1349,6 @@ static int brcmf_ops_sdio_suspend(struct device *dev)
 		return 0;
 
 	cap_power_off = !!(func->card->host->caps & MMC_CAP_POWER_OFF_CARD);
-
 	sdiodev = bus_if->bus_priv.sdio;
 
 	if (sdiodev->wowl_enabled || !cap_power_off) {
@@ -1432,4 +1431,3 @@ void brcmf_sdio_exit(void)
 
 	sdio_unregister_driver(&brcmf_sdmmc_driver);
 }
-
