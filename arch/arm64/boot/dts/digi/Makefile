@@ -112,6 +112,5 @@ dtb-$(CONFIG_ARCH_MXC) += ccimx8mm.dtb \
 			  ccimx93-mfg-functional.dtb \
 			  ccimx93-mfg-functional-wb.dtb \
 			  ccimx95.dtb \
-			  ccimx95-dvk-mfg.dtb \
 			  ccimx95-mfg-interim.dtb \
 			  ccimx95-smarc-mfg-interim.dtb
