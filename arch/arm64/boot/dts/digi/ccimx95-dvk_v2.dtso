@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright 2026 Digi International Inc.
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			overlay-description = "DVK: version 2";
+		};
+	};
+
+	/* USBC controller */
+	fragment@1 {
+		target = <&ptn5110>;
+		__overlay__ {
+			interrupt-parent = <&mca_gpio>;
+			interrupts = <15 IRQ_TYPE_LEVEL_LOW>;
+		};
+	};
+
+	/* LPUART3 routed to RS485 transceiver */
+	fragment@2 {
+		target = <&lpuart3>;
+		__overlay__ {
+			/*
+			 * Disable RS485 on DVKv2 because DE/RE# line is an MCA_IO
+			 * that cannot be toggled in interrupt context.
+			 */
+			/delete-property/linux,rs485-enabled-at-boot-time;
+			/delete-property/digi,rts-gpio;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_uart3>;
+		};
+	};
+};
