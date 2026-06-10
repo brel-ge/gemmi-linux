@@ -59,9 +59,15 @@
 		linux_cma: linux,cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0 0x3c000000>;
+			/* Default 256MiB (only if 'digi,size-table' not processed) */
+			size = <0 0x10000000>;
 			alloc-ranges = <0 0x80000000 0 0x7F000000>;
 			linux,cma-default;
+			digi,size-table = <
+				/* RAM          CMA*/
+				0x0 0x80000000  0x0 0x10000000	/* 2 GiB variants -> 256 MiB of CMA */
+				0x2 0x00000000  0x0 0x3c000000	/* 8 GiB variants -> 960 MiB of CMA */
+			>;
 		};
 
 		vpu_boot: vpu_boot@a0000000 {
@@ -148,6 +154,30 @@
 	vref-supply = <&reg_vdd_1v8_dummy>;
 };
 
+&ana_alert {
+	temperature = <85000>;
+	hysteresis = <2000>;
+	type = "passive";
+};
+
+&ana_crit0 {
+	temperature = <100000>;
+	hysteresis = <2000>;
+	type = "critical";
+};
+
+&cpu_alert0 {
+	temperature = <85000>;
+	hysteresis = <2000>;
+	type = "passive";
+};
+
+&cpu_crit0 {
+	temperature = <100000>;
+	hysteresis = <2000>;
+	type = "critical";
+};
+
 /* Enable GPIO1 to be used in Linux (not reserved by SM) */
 &gpio1 {
 	status = "okay";
@@ -159,28 +189,6 @@
 };
 
 &thermal_zones {
-	a55 {
-		trips {
-			atrip2: trip2 {
-				temperature = <55000>;
-				hysteresis = <2000>;
-				type = "active";
-			};
-
-			atrip3: trip3 {
-				temperature = <65000>;
-				hysteresis = <2000>;
-				type = "active";
-			};
-
-			atrip4: trip4 {
-				temperature = <75000>;
-				hysteresis = <2000>;
-				type = "active";
-			};
-		};
-	};
-
 	pf09 {
 		polling-delay-passive = <250>;
 		polling-delay = <2000>;

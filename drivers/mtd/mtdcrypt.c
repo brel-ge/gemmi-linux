@@ -86,46 +86,15 @@ static void dump_hex(unsigned char *buf, int len)
  * generate the MD5 sum of the contents of src.
  */
 static int mtdcrypt_calculate_md5(char *dst, struct mtd_crypt_info *crypt_info,
-		char *src, int len)
+				  char *src, int len)
 {
-	struct scatterlist sg;
-	struct crypto_ahash *tfm = crypt_info->hash_tfm;
-	struct ahash_request *req = crypt_info->hash_req;
-	int rc = 0;
+	int rc = crypto_shash_tfm_digest(crypt_info->hash_tfm, src, len, dst);
 
-	mutex_lock(&crypt_info->cs_hash_tfm_mutex);
-	sg_init_one(&sg, (u8 *)src, len);
-	if (!tfm) {
-		tfm = crypto_alloc_ahash("md5", 0, CRYPTO_ALG_ASYNC);
-		if (IS_ERR(tfm)) {
-			rc = PTR_ERR(tfm);
-			pr_err("mtdcrypt: Error attempting to allocate crypto context; rc = [%d]\n",
-					rc);
-			goto out;
-		}
-		req = ahash_request_alloc(tfm, GFP_ATOMIC);
-		if (!req) {
-			crypto_free_ahash(tfm);
-
-			pr_err("mtdcrypt: Error attempting to allocate ahash req\n");
-			rc = -ENOMEM;
-			goto out;
-		}
-		ahash_request_set_callback(req, 0, NULL, NULL);
-
-		crypt_info->hash_tfm = tfm;
-		crypt_info->hash_req = req;
+	if (rc) {
+		pr_err("mtdcrypt: Error computing crypto hash; rc = [%d]\n",
+		       rc);
 	}
 
-	ahash_request_set_crypt(req, &sg, dst, len);
-	if (crypto_ahash_digest(req)) {
-		pr_err("mtdcrypt: Error computing crypto hash");
-		rc = -1;
-		goto out;
-	}
-
-out:
-	mutex_unlock(&crypt_info->cs_hash_tfm_mutex);
 	return rc;
 }
 
@@ -306,13 +275,14 @@ out:
  */
 static int mtdcrypt_op(struct mtd_crypt_info *crypt_info,
 			const u_char *buf, u_char *dstbuf, int len,
-			unsigned long block_offset, int op)
+			loff_t block_offset, int op)
 {
 	char iv[MAX_IV_BYTES];
 	struct sg_table sg_tbl;
 	struct scatterlist *sgl;
 	int rc, rest, i, tmp_len;
 	int nents = 0;
+	int allocated = 0;
 	gfp_t gfp_mask = GFP_KERNEL | GFP_NOIO | GFP_DMA;
 	u_char *mp_entry = NULL;
 
@@ -346,6 +316,7 @@ static int mtdcrypt_op(struct mtd_crypt_info *crypt_info,
 			goto mempool_out;
 		}
 		sg_set_buf(sgl, mp_entry, tmp_len);
+		allocated++;
 	}
 	rc = sg_copy_from_buffer(sg_tbl.sgl, nents, (void *)buf, len);
 	if (rc != len) {
@@ -363,8 +334,8 @@ static int mtdcrypt_op(struct mtd_crypt_info *crypt_info,
 	rc = mtdcrypt_scatterlist(crypt_info, sg_tbl.sgl, sg_tbl.sgl,
 			len, iv, op);
 	if (rc < 0) {
-		pr_err("mtdcrypt: Error attempting to crypt page with block_offset = [%ld]; rc = [%d]\n",
-				block_offset, rc);
+		pr_err("mtdcrypt: Error attempting to crypt page with block_offset = [%#llx]; rc = [%d]\n",
+				(unsigned long long)block_offset, rc);
 		goto mempool_out;
 	}
 
@@ -378,8 +349,8 @@ static int mtdcrypt_op(struct mtd_crypt_info *crypt_info,
 	rc = 0;
 
 mempool_out:
-	for_each_sg(sg_tbl.sgl, sgl, nents, i)
-		mempool_free(mp_entry, crypt_info->mem_pool);
+	for_each_sg(sg_tbl.sgl, sgl, allocated, i)
+		mempool_free(sg_virt(sgl), crypt_info->mem_pool);
 sgtbl_out:
 	sg_free_table(&sg_tbl);
 out:
@@ -601,20 +572,25 @@ void strtohex(char *in, unsigned long *out, int len)
 
 static int adjust_offset_skipping_bad_blocks(struct mtd_info *mtd, int offset)
 {
-	if (mtd_block_isbad(mtd, offset)) {
-		const int new_offset = offset + mtd->erasesize;
+	int ret;
 
-		return adjust_offset_skipping_bad_blocks(mtd, new_offset);
+	while (1) {
+		ret = mtd_block_isbad(mtd, offset);
+		if (ret < 0)
+			return ret;
+		if (!ret)
+			return offset;
+
+		offset += mtd->erasesize;
 	}
-
-	return offset;
 }
 
 static int mtdcrypt_get_key_from_part(int keyblob_part, int keyblob_size,
 				      int keyblob_offset, char *keyblob_str)
 {
 	struct mtd_info *mtd_part;
-	size_t retlen;
+	size_t retlen = 0;
+	int ret;
 
 	if (keyblob_size > MAX_KEYBLOB_BYTES) {
 		pr_err("mtdcrypt: Missing valid key blob size\n");
@@ -622,19 +598,32 @@ static int mtdcrypt_get_key_from_part(int keyblob_part, int keyblob_size,
 	}
 
 	mtd_part = get_mtd_device(NULL, keyblob_part);
-	keyblob_offset = adjust_offset_skipping_bad_blocks(mtd_part,
-							   keyblob_offset);
-	if (mtd_read(mtd_part, keyblob_offset, keyblob_size,
-		     &retlen, keyblob_str)) {
-		pr_err("mtdcrypt: Failed to read keyblob from media\n");
-		return -EINVAL;
+	if (IS_ERR(mtd_part)) {
+		pr_err("mtdcrypt: Failed to get keyblob partition %d: %ld\n",
+		       keyblob_part, PTR_ERR(mtd_part));
+		return PTR_ERR(mtd_part);
 	}
 
-	if (retlen != keyblob_size) {
-		pr_err("mtdcrypt: Failed to read keyblob from media\n");
-		return -EINVAL;
+	keyblob_offset =
+		adjust_offset_skipping_bad_blocks(mtd_part, keyblob_offset);
+	if (keyblob_offset < 0) {
+		pr_err("mtdcrypt: Failed to get keyblob offset: %d\n",
+		       keyblob_offset);
+		ret = keyblob_offset;
+		goto out;
 	}
-	return 0;
+
+	ret = mtd_read(mtd_part, keyblob_offset, keyblob_size, &retlen,
+		       keyblob_str);
+	if (ret || retlen != keyblob_size) {
+		pr_err("mtdcrypt: Failed to read keyblob from media\n");
+		ret = -EINVAL;
+	}
+
+out:
+	put_mtd_device(mtd_part);
+
+	return ret;
 }
 
 static int mtdcrypt_set_key(struct mtd_info *mtd)
@@ -780,7 +769,7 @@ out_err1:
  */
 int mtdcrypt_init_crypt_info(struct mtd_info *mtd)
 {
-	char *full_alg_name;
+	char *full_alg_name = NULL;
 	int rc = -EINVAL;
 	int i;
 
@@ -797,7 +786,6 @@ int mtdcrypt_init_crypt_info(struct mtd_info *mtd)
 	}
 
 	mutex_init(&mtd->crypt_info->cs_tfm_mutex);
-	mutex_init(&mtd->crypt_info->cs_hash_tfm_mutex);
 
 	mutex_lock(&mtd->crypt_info->cs_tfm_mutex);
 
@@ -805,7 +793,8 @@ int mtdcrypt_init_crypt_info(struct mtd_info *mtd)
 			PAGE_SIZE);
 	if (!mtd->crypt_info->mem_pool) {
 		pr_err("mtdcrypt: Error allocating memory pool\n");
-		return -ENOMEM;
+		rc = -ENOMEM;
+		goto err_unlock;
 	}
 
 	mtd->crypt_info->block_size = mtd->writesize >> mtd->subpage_sft;
@@ -818,37 +807,52 @@ int mtdcrypt_init_crypt_info(struct mtd_info *mtd)
 			mtd->crypt_info->block_shift);
 	strcpy(mtd->crypt_info->cipher, DEFAULT_CIPHER);
 	mtd->crypt_info->key_size = DEFAULT_KEY_BYTES;
+	mtd->crypt_info->hash_tfm = crypto_alloc_shash("md5", 0, 0);
+	if (IS_ERR(mtd->crypt_info->hash_tfm)) {
+		rc = PTR_ERR(mtd->crypt_info->hash_tfm);
+		mtd->crypt_info->hash_tfm = NULL;
+		pr_err("mtdcrypt: Error attempting to allocate crypto context; rc = [%d]\n",
+		       rc);
+		goto err_free_mempool;
+	}
 
 #if defined(CONFIG_CRYPTO_DEV_FSL_CAAM)
 	mtd->crypt_info->jr_dev = caam_jr_alloc();
+	if (IS_ERR(mtd->crypt_info->jr_dev)) {
+		pr_err("Job Ring device allocation failed\n");
+		rc = PTR_ERR(mtd->crypt_info->jr_dev);
+		goto err_free_mempool;
+	}
 #endif
 	mtd->crypt_info->key = kzalloc(MAX_KEY_BYTES, GFP_KERNEL | GFP_DMA);
+	if (!mtd->crypt_info->key) {
+		rc = -ENOMEM;
+		goto err_free_jr;
+	}
 	rc = mtdcrypt_set_key(mtd);
 	if (rc) {
 		pr_err("mtdcrypt: Unable to set crypto key.\n");
 		rc = -EINVAL;
-		goto out_unlock;
+		goto err_free_key;
 	}
 
-#if defined(CONFIG_CRYPTO_DEV_FSL_CAAM)
-	caam_jr_free(mtd->crypt_info->jr_dev);
-#endif
 	mtdcrypt_compute_root_iv(mtd->crypt_info);
 	if (mtd->crypt_info->skcipher) {
 		rc = 0;
-		goto out_unlock;
+		goto out;
 	}
 	rc = mtdcrypt_api_algify_cipher_name(&full_alg_name,
 					mtd->crypt_info->cipher, "cbc");
 	if (rc)
-		goto out_unlock;
+		goto err_free_key;
+
 	mtd->crypt_info->skcipher = crypto_alloc_skcipher(full_alg_name, 0, 0);
 	if (IS_ERR(mtd->crypt_info->skcipher)) {
 		rc = PTR_ERR(mtd->crypt_info->skcipher);
 		mtd->crypt_info->skcipher = NULL;
 		pr_err("mtdcrypt: Error initializing cipher [%s]\n",
 				full_alg_name);
-		goto out_free;
+		goto err_free_alg_name;
 	}
 
 	crypto_skcipher_set_flags(mtd->crypt_info->skcipher,
@@ -858,7 +862,7 @@ int mtdcrypt_init_crypt_info(struct mtd_info *mtd)
 	if (rc) {
 		pr_err("mtdcrypt: Error setting key; rc = [%d]\n", rc);
 		rc = -EINVAL;
-		goto out_free;
+		goto err_free_skcipher;
 	}
 	mtd->crypt_info->flags |=  (KEY_SET | STRUCT_INITIALIZED);
 	rc = 0;
@@ -867,10 +871,38 @@ int mtdcrypt_init_crypt_info(struct mtd_info *mtd)
 		mtd->crypt_info->cipher, (int)strlen(mtd->crypt_info->cipher),
 		mtd->crypt_info->key_size << 3);
 
-out_free:
+out:
 	kfree(full_alg_name);
-out_unlock:
+#if defined(CONFIG_CRYPTO_DEV_FSL_CAAM)
+	caam_jr_free(mtd->crypt_info->jr_dev);
+	mtd->crypt_info->jr_dev = NULL;
+#endif
 	mutex_unlock(&mtd->crypt_info->cs_tfm_mutex);
+	return rc;
+
+err_free_skcipher:
+	crypto_free_skcipher(mtd->crypt_info->skcipher);
+	mtd->crypt_info->skcipher = NULL;
+err_free_alg_name:
+	kfree(full_alg_name);
+err_free_key:
+	crypto_free_shash(mtd->crypt_info->hash_tfm);
+	mtd->crypt_info->hash_tfm = NULL;
+	kfree(mtd->crypt_info->key);
+	mtd->crypt_info->key = NULL;
+err_free_jr:
+#if defined(CONFIG_CRYPTO_DEV_FSL_CAAM)
+	caam_jr_free(mtd->crypt_info->jr_dev);
+	mtd->crypt_info->jr_dev = NULL;
+#endif
+err_free_mempool:
+	mempool_destroy(mtd->crypt_info->mem_pool);
+	mtd->crypt_info->mem_pool = NULL;
+err_unlock:
+	mutex_unlock(&mtd->crypt_info->cs_tfm_mutex);
+	mutex_destroy(&mtd->crypt_info->cs_tfm_mutex);
+	kfree(mtd->crypt_info);
+	mtd->crypt_info = NULL;
 	return rc;
 }
 EXPORT_SYMBOL_GPL(mtdcrypt_init_crypt_info);
@@ -884,10 +916,19 @@ EXPORT_SYMBOL_GPL(mtdcrypt_init_crypt_info);
  */
 void mtdcrypt_destroy_crypt_info(struct mtd_info *mtd)
 {
-	mutex_destroy(&mtd->crypt_info->cs_tfm_mutex);
-	mutex_destroy(&mtd->crypt_info->cs_hash_tfm_mutex);
-	kfree(mtd->crypt_info->key);
-	mempool_destroy(mtd->crypt_info->mem_pool);
-	kfree(mtd->crypt_info);
+	struct mtd_crypt_info *ci = mtd->crypt_info;
+
+	if (!ci)
+		return;
+
+	crypto_free_shash(ci->hash_tfm);
+	crypto_free_skcipher(ci->skcipher);
+	kfree(ci->key);
+	mempool_destroy(ci->mem_pool);
+
+	mutex_destroy(&ci->cs_tfm_mutex);
+
+	kfree(ci);
+	mtd->crypt_info = NULL;
 }
 EXPORT_SYMBOL_GPL(mtdcrypt_destroy_crypt_info);

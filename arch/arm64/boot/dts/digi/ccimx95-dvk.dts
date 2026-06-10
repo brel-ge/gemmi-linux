@@ -46,6 +46,17 @@
 		};
 	};
 
+	leds {
+		compatible = "gpio-leds";
+
+		boot_led: boot-led {
+			label = "boot";
+			gpios = <&mca_gpio 1 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "default-on";
+			default-state = "on";
+		};
+	};
+
 	/* Required placeholder to inject LVDS0 overlay */
 	lvds0-panel {
 		status = "disabled";
@@ -130,12 +141,24 @@
 	status = "okay";
 };
 
+/* GBE1 */
+&enetc_port0 {
+	status = "okay";
+};
+
+/* GBE2 */
+&enetc_port1 {
+	status = "okay";
+};
+
 &flexcan2 {
 	xceiver-supply = <&reg_5v_board>;
+	status = "okay";
 };
 
 &flexcan3 {
 	xceiver-supply = <&reg_5v_board>;
+	status = "okay";
 };
 
 &flexspi1 {
@@ -144,9 +167,9 @@
 	pinctrl-1 = <&pinctrl_flexspi1>;
 	/*
 	 * TODO: reset line unsupported by FlexSPI driver
-	 * SMARC_ESPI_RESET# comes from MCA PA12
+	 * SMARC_ESPI_RESET# comes from MCA_IO16
 	 */
-	status = "disabled";
+	status = "okay";
 };
 
 &lpi2c2 {
@@ -202,6 +225,10 @@
 		clock-names = "mclk";
 		dvdd-supply = <&reg_vdd_1v8_dummy>;
 	};
+};
+
+&lpi2c5 {
+	status = "okay";
 };
 
 &lpi2c7 {
@@ -275,8 +302,12 @@
 
 /* LPUART3 routed to RS485 transceiver */
 &lpuart3 {
-	linux,rs485-enabled-at-boot-time;
-	digi,rts-gpio = <&mca_gpio 18 GPIO_ACTIVE_HIGH>;
+	/*
+	 * Disable RS485 on DVKv2 because DE/RE# line is an MCA_IO
+	 * that cannot be toggled in interrupt context.
+	 */
+	// linux,rs485-enabled-at-boot-time;
+	// digi,rts-gpio = <&mca_gpio 18 GPIO_ACTIVE_HIGH>;
 	/delete-property/dmas;
 	/delete-property/dma-names;
 	status = "okay";
@@ -306,16 +337,27 @@
 	};
 };
 
+/* Shared Ethernet MDIO */
+&netc_emdio {
+	status = "okay";
+};
+
+&netc_timer {
+	status = "okay";
+};
+
 /* M.2 E-Key slot */
 &pcie0 {
 	vpcie-supply = <&reg_3v3_board>;
-	reset-gpios = <&mca_gpio 25 GPIO_ACTIVE_LOW>;	/* MCA PB10 */
+	reset-gpio = <&mca_gpio 25 GPIO_ACTIVE_LOW>;	/* MCA PB10 */
+	status = "okay";
 };
 
 /* M.2 B-Key slot */
 &pcie1 {
 	vpcie-supply = <&reg_3v3_board>;
-	reset-gpios = <&mca_gpio 10 GPIO_ACTIVE_LOW>;	/* MCA PB1 */
+	reset-gpio = <&mca_gpio 10 GPIO_ACTIVE_LOW>;	/* MCA PB1 */
+	status = "okay";
 };
 
 &pcie1_ep {
@@ -333,9 +375,12 @@
 	};
 };
 
+&sai3 {
+	status = "okay";
+};
+
 &usb2 {
-	/* On SMARC DVKv1 powered directly from VIN_5V */
-	vbus-supply = <&reg_board_main>;
+	vbus-supply = <&reg_5v_board>;
 	dr_mode = "host";
 	disable-over-current;
 	status = "okay";
@@ -381,6 +426,7 @@
 /* MicroSD */
 &usdhc2 {
 	vmmc-supply = <&reg_3v3_board>;
+	status = "okay";
 };
 
 &wdog3 {

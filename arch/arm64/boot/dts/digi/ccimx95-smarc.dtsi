@@ -11,14 +11,12 @@
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&pinctrl_flexcan2>;
 	pinctrl-1 = <&pinctrl_flexcan2_sleep>;
-	status = "okay";
 };
 
 &flexcan3 {
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&pinctrl_flexcan3>;
 	pinctrl-1 = <&pinctrl_flexcan3_sleep>;
-	status = "okay";
 };
 
 &flexspi1 {
@@ -125,7 +123,6 @@
 			digi,key-sleep;
 			digi,debounce-ms = <100>;
 			digi,pwroff-delay-sec = <6>;
-			digi,pwroff-guard-sec = <30>;
 		};
 	};
 };
@@ -160,7 +157,6 @@
 	pinctrl-1 = <&pinctrl_enetc0_sleep>;
 	phy-handle = <&ethphy0>;
 	phy-mode = "rgmii-id";
-	status = "okay";
 };
 
 &enetc_port1 {
@@ -169,29 +165,25 @@
 	pinctrl-1 = <&pinctrl_enetc1_sleep>;
 	phy-handle = <&ethphy1>;
 	phy-mode = "rgmii-id";
-	status = "okay";
 };
 
 &netc_emdio {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_emdio>;
-	status = "okay";
 
 	ethphy0: ethernet-phy@5 {
 		reg = <5>;
-		compatible = "ethernet-phy-ieee802.3-c22";
-		// TODO: MCA PC1
-		// interrupt-parent = <&mca_gpio>;
-		// interrupts = <? IRQ_TYPE_LEVEL_LOW>;
+		compatible = "ethernet-phy-id0022.1652"; /* PHY ID for Microchip LAN8840 */
+		interrupt-parent = <&mca_gpio>;
+		interrupts = <26 IRQ_TYPE_LEVEL_LOW>;
 		status = "okay";
 	};
 
 	ethphy1: ethernet-phy@7 {
 		reg = <7>;
-		compatible = "ethernet-phy-ieee802.3-c22";
-		// TODO: MCA PC1
-		// interrupt-parent = <&mca_gpio>;
-		// interrupts = <? IRQ_TYPE_LEVEL_LOW>;
+		compatible = "ethernet-phy-id0022.1652"; /* PHY ID for Microchip LAN8840 */
+		interrupt-parent = <&mca_gpio>;
+		interrupts = <26 IRQ_TYPE_LEVEL_LOW>;
 		status = "okay";
 	};
 };
@@ -202,20 +194,12 @@
 			   NXP_NETC_SERIAL>;
 };
 
-&netc_timer {
-	status = "okay";
-};
-
 &pcie0 {
 	fsl,refclk-pad-mode = <IMX8_PCIE_REFCLK_PAD_OUTPUT>;
-	reset-gpio = <&mca_gpio 25 0>;		/* PB10 */
-	status = "okay";
 };
 
 &pcie1 {
 	fsl,refclk-pad-mode = <IMX8_PCIE_REFCLK_PAD_OUTPUT>;
-	reset-gpio = <&mca_gpio 10 0>;		/* PB1 */
-	status = "okay";
 };
 
 &sai3 {
@@ -234,7 +218,6 @@
 			       <3612672000>, <393216000>,
 			       <361267200>, <12288000>;
 	fsl,sai-mclk-direction-output;
-	status = "okay";
 };
 
 /* Disable BBM (i.MX95 RTC and ON/OFF key) */
@@ -252,7 +235,6 @@
 	cd-gpios = <&gpio3 00 GPIO_ACTIVE_HIGH>;
 	fsl,cd-gpio-wakeup-disable;
 	bus-width = <4>;
-	status = "okay";
 };
 
 &vpuctrl {
@@ -308,10 +290,10 @@
 			IMX95_PAD_ENET2_TD2__NETCMIX_TOP_ETH1_RGMII_TD2		0x57e
 			IMX95_PAD_ENET2_TD1__NETCMIX_TOP_ETH1_RGMII_TD1		0x57e
 			IMX95_PAD_ENET2_TD0__NETCMIX_TOP_ETH1_RGMII_TD0		0x57e
-			IMX95_PAD_ENET2_TX_CTL__NETCMIX_TOP_ETH1_RGMII_TX_CTL	0x58e
-			IMX95_PAD_ENET2_TXC__NETCMIX_TOP_ETH1_RGMII_TX_CLK	0x5fe
-			IMX95_PAD_ENET2_RX_CTL__NETCMIX_TOP_ETH1_RGMII_RX_CTL	0x58e
-			IMX95_PAD_ENET2_RXC__NETCMIX_TOP_ETH1_RGMII_RX_CLK	0x5fe
+			IMX95_PAD_ENET2_TX_CTL__NETCMIX_TOP_ETH1_RGMII_TX_CTL	0x57e
+			IMX95_PAD_ENET2_TXC__NETCMIX_TOP_ETH1_RGMII_TX_CLK	0x58e
+			IMX95_PAD_ENET2_RX_CTL__NETCMIX_TOP_ETH1_RGMII_RX_CTL	0x57e
+			IMX95_PAD_ENET2_RXC__NETCMIX_TOP_ETH1_RGMII_RX_CLK	0x58e
 			IMX95_PAD_ENET2_RD0__NETCMIX_TOP_ETH1_RGMII_RD0		0x57e
 			IMX95_PAD_ENET2_RD1__NETCMIX_TOP_ETH1_RGMII_RD1		0x57e
 			IMX95_PAD_ENET2_RD2__NETCMIX_TOP_ETH1_RGMII_RD2		0x57e

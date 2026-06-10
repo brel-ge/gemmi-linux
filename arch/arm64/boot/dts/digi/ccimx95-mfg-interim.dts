@@ -136,10 +136,6 @@
 	status = "okay";
 };
 
-&cm7 {
-	status = "disabled";
-};
-
 &csi_pixel_formatter_0 {
 	status = "okay";
 
@@ -368,7 +364,7 @@
 
 /* mikroBUS SPI interface */
 &lpspi8 {
-	fsl,spi-num-chipselects = <1>;
+	num-cs = <1>;
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&pinctrl_lpspi8>;
 	pinctrl-1 = <&pinctrl_lpspi8_gpio>;
@@ -404,7 +400,6 @@
 &lpuart4 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_uart4>, <&pinctrl_xbee_rf_gpios>;
-	fsl,uart-has-rtscts;
 	status = "disabled";
 };
 
