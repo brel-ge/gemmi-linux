@@ -289,9 +289,13 @@
 		typec_con: connector {
 			compatible = "usb-c-connector";
 			label = "USB-C";
-			power-role = "source";
+			power-role = "dual";
 			data-role = "dual";
+			try-power-role = "sink";
 			source-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
+			sink-pdos = <PDO_FIXED(5000, 0, PDO_FIXED_USB_COMM)>;
+			op-sink-microwatt = <0>;
+			self-powered;
 
 			ports {
 				#address-cells = <1>;
@@ -562,7 +566,7 @@
 	srp-disable;
 	adp-disable;
 	usb-role-switch;
-	role-switch-default-mode = "none";
+	role-switch-default-mode = "host";
 	snps,dis-u1-entry-quirk;
 	snps,dis-u2-entry-quirk;
 	status = "okay";
