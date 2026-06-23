@@ -116,22 +116,6 @@
 	status = "okay";
 };
 
-&isi_0 {
-	status = "okay";
-};
-
-&isi_1 {
-	status = "okay";
-};
-
-&isi_2 {
-	status = "okay";
-};
-
-&isi_3 {
-	status = "okay";
-};
-
 &ldb1 {
 	status = "okay";
 };

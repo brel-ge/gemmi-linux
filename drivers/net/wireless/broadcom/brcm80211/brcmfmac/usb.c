@@ -119,13 +119,6 @@ struct bootrom_id_le {
 	__le32 boardrev;	/* Board revision */
 };
 
-struct brcmf_usb_image {
-	struct list_head list;
-	s8 *fwname;
-	u8 *image;
-	int image_len;
-};
-
 struct brcmf_usbdev_info {
 	struct brcmf_usbdev bus_pub; /* MUST BE FIRST */
 	spinlock_t qlock;
@@ -764,15 +757,19 @@ static int brcmf_usb_dl_cmd(struct brcmf_usbdev_info *devinfo, u8 cmd,
 			    void *buffer, int buflen)
 {
 	int ret;
-	char *tmpbuf;
+	char *tmpbuf = NULL;
 	u16 size;
 
-	if ((!devinfo) || (devinfo->ctl_urb == NULL))
-		return -EINVAL;
+	if (!devinfo || !devinfo->ctl_urb) {
+		ret = -EINVAL;
+		goto err;
+	}
 
 	tmpbuf = kmalloc(buflen, GFP_ATOMIC);
-	if (!tmpbuf)
-		return -ENOMEM;
+	if (!tmpbuf) {
+		ret = -ENOMEM;
+		goto err;
+	}
 
 	size = buflen;
 	devinfo->ctl_urb->transfer_buffer_length = size;
@@ -793,18 +790,23 @@ static int brcmf_usb_dl_cmd(struct brcmf_usbdev_info *devinfo, u8 cmd,
 	ret = usb_submit_urb(devinfo->ctl_urb, GFP_ATOMIC);
 	if (ret < 0) {
 		brcmf_err("usb_submit_urb failed %d\n", ret);
-		goto finalize;
+		goto err;
 	}
 
 	if (!brcmf_usb_ioctl_resp_wait(devinfo)) {
 		usb_kill_urb(devinfo->ctl_urb);
 		ret = -ETIMEDOUT;
+		goto err;
 	} else {
 		memcpy(buffer, tmpbuf, buflen);
 	}
 
-finalize:
 	kfree(tmpbuf);
+	return 0;
+
+err:
+	kfree(tmpbuf);
+	brcmf_err("dl cmd %u failed: err=%d\n", cmd, ret);
 	return ret;
 }
 
@@ -919,14 +921,16 @@ brcmf_usb_dl_writeimage(struct brcmf_usbdev_info *devinfo, u8 *fw, int fwlen)
 	}
 
 	/* 1) Prepare USB boot loader for runtime image */
-	brcmf_usb_dl_cmd(devinfo, DL_START, &state, sizeof(state));
+	err = brcmf_usb_dl_cmd(devinfo, DL_START, &state, sizeof(state));
+	if (err)
+		goto fail;
 
 	rdlstate = le32_to_cpu(state.state);
 	rdlbytes = le32_to_cpu(state.bytes);
 
 	/* 2) Check we are in the Waiting state */
 	if (rdlstate != DL_WAITING) {
-		brcmf_err("Failed to DL_START\n");
+		brcmf_err("Invalid DL state: %u\n", rdlstate);
 		err = -EINVAL;
 		goto fail;
 	}
@@ -939,10 +943,7 @@ brcmf_usb_dl_writeimage(struct brcmf_usbdev_info *devinfo, u8 *fw, int fwlen)
 		/* Wait until the usb device reports it received all
 		 * the bytes we sent */
 		if ((rdlbytes == sent) && (rdlbytes != dllen)) {
-			if ((dllen-sent) < TRX_RDL_CHUNK)
-				sendlen = dllen-sent;
-			else
-				sendlen = TRX_RDL_CHUNK;
+			sendlen = min(dllen - sent, TRX_RDL_CHUNK);
 
 			/* simply avoid having to send a ZLP by ensuring we
 			 * never have an even
@@ -1288,8 +1289,8 @@ brcmf_usb_prepare_fw_request(struct brcmf_usbdev_info *devinfo)
 static int brcmf_usb_probe_cb(struct brcmf_usbdev_info *devinfo,
 			      enum brcmf_fwvendor fwvid)
 {
-	struct brcmf_bus *bus = NULL;
-	struct brcmf_usbdev *bus_pub = NULL;
+	struct brcmf_bus *bus;
+	struct brcmf_usbdev *bus_pub;
 	struct device *dev = devinfo->dev;
 	struct brcmf_fw_request *fwreq;
 	int ret;
@@ -1299,7 +1300,7 @@ static int brcmf_usb_probe_cb(struct brcmf_usbdev_info *devinfo,
 	if (!bus_pub)
 		return -ENODEV;
 
-	bus = kzalloc(sizeof(struct brcmf_bus), GFP_ATOMIC);
+	bus = kzalloc(sizeof(*bus), GFP_ATOMIC);
 	if (!bus) {
 		ret = -ENOMEM;
 		goto fail;
@@ -1327,6 +1328,9 @@ static int brcmf_usb_probe_cb(struct brcmf_usbdev_info *devinfo,
 		ret = -ENOMEM;
 		goto fail;
 	}
+	ret = PTR_ERR_OR_ZERO(devinfo->settings);
+	if (ret < 0)
+		goto fail;
 
 	if (!brcmf_usb_dlneeded(devinfo)) {
 		ret = brcmf_alloc(devinfo->dev, devinfo->settings);
@@ -1707,7 +1711,7 @@ static int brcmf_usb_reset_device(struct device *dev, void *notused)
 
 void brcmf_usb_exit(void)
 {
-	struct device_driver *drv = &brcmf_usbdrvr.drvwrap.driver;
+	struct device_driver *drv = &brcmf_usbdrvr.driver;
 	int ret;
 
 	brcmf_dbg(USB, "Enter\n");

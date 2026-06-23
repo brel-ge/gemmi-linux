@@ -2,7 +2,7 @@
 *
 *    The MIT License (MIT)
 *
-*    Copyright (c) 2014 - 2023 Vivante Corporation
+*    Copyright (c) 2014 - 2024 Vivante Corporation
 *
 *    Permission is hereby granted, free of charge, to any person obtaining a
 *    copy of this software and associated documentation files (the "Software"),
@@ -26,7 +26,7 @@
 *
 *    The GPL License (GPL)
 *
-*    Copyright (C) 2014 - 2023 Vivante Corporation
+*    Copyright (C) 2014 - 2024 Vivante Corporation
 *
 *    This program is free software; you can redistribute it and/or
 *    modify it under the terms of the GNU General Public License
@@ -351,7 +351,11 @@ _NonContiguous1MPagesAlloc(IN struct gfp_mdl_priv *MdlPriv,
         if (MdlPriv->Pages1M[i] == gcvNULL) {
             int order = get_order(gcd1M_PAGE_SIZE);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+            if (order >= MAX_PAGE_ORDER)
+#else
             if (order >= MAX_ORDER)
+#endif
                 gcmkONERROR(gcvSTATUS_OUT_OF_MEMORY);
 
             MdlPriv->Pages1M[i] = alloc_pages(Gfp, order);
@@ -363,7 +367,11 @@ _NonContiguous1MPagesAlloc(IN struct gfp_mdl_priv *MdlPriv,
         MdlPriv->numPages1M += 1;
 
         for (j = 0; j < num; j++) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
             page               = nth_page(MdlPriv->Pages1M[i], j);
+#else
+            page = MdlPriv->Pages1M[i] + j;
+#endif
             pages[i * num + j] = page;
         }
     }
@@ -478,7 +486,11 @@ Alloc:
         if (mdlPriv->contiguousPages == gcvNULL) {
             int order = get_order(bytes);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+            if (order >= MAX_PAGE_ORDER) {
+#else
             if (order >= MAX_ORDER) {
+#endif
                 status = gcvSTATUS_OUT_OF_MEMORY;
                 goto OnError;
             }
@@ -604,7 +616,11 @@ Alloc:
         struct page *page;
 
         if (contiguous)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
             page = nth_page(mdlPriv->contiguousPages, i);
+#else
+            page = mdlPriv->contiguousPages + i;
+#endif
         else
             page = mdlPriv->nonContiguousPages[i];
 
@@ -660,7 +676,11 @@ _GFPGetSGT(IN gckALLOCATOR Allocator,
             gcmkONERROR(gcvSTATUS_OUT_OF_MEMORY);
 
         for (i = 0; i < numPages; ++i)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
             pages[i] = nth_page(mdlPriv->contiguousPages, i + skipPages);
+#else
+            pages[i] = mdlPriv->contiguousPages + i + skipPages;
+#endif
     } else {
         pages = &mdlPriv->nonContiguousPages[skipPages];
     }
@@ -718,7 +738,11 @@ _GFPFree(IN gckALLOCATOR Allocator, IN OUT PLINUX_MDL Mdl)
 
     for (i = 0; i < Mdl->numPages; i++) {
         if (mdlPriv->contiguous)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
             page = nth_page(mdlPriv->contiguousPages, i);
+#else
+            page = mdlPriv->contiguousPages + i;
+#endif
         else
             page = mdlPriv->nonContiguousPages[i];
 
@@ -973,7 +997,11 @@ _GFPMapKernel(IN gckALLOCATOR Allocator,
             return gcvSTATUS_OUT_OF_MEMORY;
 
         for (i = 0; i < numPages; i++)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
             pages[i] = nth_page(mdlPriv->contiguousPages, i + pgoff);
+#else
+            pages[i] = mdlPriv->contiguousPages + i + pgoff;
+#endif
 
         free = gcvTRUE;
     } else {
@@ -1099,7 +1127,11 @@ _GFPPhysical(IN gckALLOCATOR     Allocator,
     gctUINT32            index        = Offset / PAGE_SIZE;
 
     if (mdlPriv->contiguous)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
         *Physical = page_to_phys(nth_page(mdlPriv->contiguousPages, index));
+#else
+        *Physical = page_to_phys(mdlPriv->contiguousPages + index);
+#endif
     else
         *Physical = page_to_phys(mdlPriv->nonContiguousPages[index]);
 
@@ -1165,6 +1197,7 @@ _GFPAlloctorInit(IN gckOS Os, IN gcsDEBUGFS_DIR *Parent, OUT gckALLOCATOR *Alloc
                           | gcvALLOC_FLAG_MEMLIMIT
                           | gcvALLOC_FLAG_ALLOC_ON_FAULT
                           | gcvALLOC_FLAG_DMABUF_EXPORTABLE
+                          | gcvALLOC_FLAG_FROM_USER
 #if (defined(CONFIG_ZONE_DMA32) || defined(CONFIG_ZONE_DMA)) && LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37)
                           | gcvALLOC_FLAG_4GB_ADDR
 #endif

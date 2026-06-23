@@ -198,11 +198,9 @@ void dpu_bliteng_set_dev(struct dpu_bliteng *dpu_be, struct device *dev)
 }
 EXPORT_SYMBOL(dpu_bliteng_set_dev);
 
-int dpu_be_get(struct dpu_bliteng *dpu_be)
+void dpu_be_get(struct dpu_bliteng *dpu_be)
 {
 	mutex_lock(&dpu_be->mutex);
-
-	return 0;
 }
 EXPORT_SYMBOL(dpu_be_get);
 
@@ -318,8 +316,8 @@ int dpu_be_get_fence(struct dpu_bliteng *dpu_be, int dpu_num)
 failed:
 	if (sync)
 		fput(sync->file);
-
-	kfree(fence);
+	else
+		dma_fence_put(&fence->base);
 
 	return -1;
 }

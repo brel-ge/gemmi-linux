@@ -53,12 +53,4 @@
 		};
 	};
 
-	/* Enable PCIE clock */
-	fragment@3 {
-		target = <&phyx1>;
-		__overlay__ {
-			fsl,refclk-pad-mode = <IMX8_PCIE_REFCLK_PAD_INPUT>;
-			status = "okay";
-		};
-	};
 };

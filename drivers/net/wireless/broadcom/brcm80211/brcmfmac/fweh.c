@@ -138,7 +138,7 @@ static int brcmf_fweh_call_event_handler(struct brcmf_pub *drvr,
 	int err = -EINVAL;
 
 	if (ifp) {
-		fweh = &ifp->drvr->fweh;
+		fweh = ifp->drvr->fweh;
 
 		/* handle the event if valid interface and handler */
 		if (fweh->evt_handler[code])
@@ -178,7 +178,7 @@ static void brcmf_fweh_handle_if_event(struct brcmf_pub *drvr,
 	is_p2pdev = ((ifevent->flags & BRCMF_E_IF_FLAG_NOIF) &&
 		     (ifevent->role == BRCMF_E_IF_ROLE_P2P_CLIENT ||
 		      ((ifevent->role == BRCMF_E_IF_ROLE_STA) &&
-		       (drvr->fweh.p2pdev_setup_ongoing))));
+		       (drvr->fweh->p2pdev_setup_ongoing))));
 	if (!is_p2pdev && (ifevent->flags & BRCMF_E_IF_FLAG_NOIF)) {
 		brcmf_dbg(EVENT, "event can be ignored\n");
 		return;
@@ -199,7 +199,7 @@ static void brcmf_fweh_handle_if_event(struct brcmf_pub *drvr,
 			return;
 		if (!is_p2pdev)
 			brcmf_proto_add_if(drvr, ifp);
-		if (!drvr->fweh.evt_handler[BRCMF_E_IF])
+		if (!drvr->fweh->evt_handler[BRCMF_E_IF])
 			if (brcmf_net_attach(ifp, false) < 0)
 				return;
 	}
@@ -258,7 +258,7 @@ static void brcmf_fweh_event_worker(struct work_struct *work)
 	char *reason_str = NULL;
 
 	fweh = container_of(work, struct brcmf_fweh_info, event_work);
-	drvr = container_of(fweh, struct brcmf_pub, fweh);
+	drvr = fweh->drvr;
 
 	while ((event = brcmf_fweh_dequeue_event(fweh))) {
 		brcmf_dbg(EVENT, "event %s (%u) ifidx %u bsscfg %u addr %pM\n",
@@ -326,7 +326,7 @@ event_free:
  */
 void brcmf_fweh_p2pdev_setup(struct brcmf_if *ifp, bool ongoing)
 {
-	ifp->drvr->fweh.p2pdev_setup_ongoing = ongoing;
+	ifp->drvr->fweh->p2pdev_setup_ongoing = ongoing;
 }
 
 /**
@@ -336,7 +336,16 @@ void brcmf_fweh_p2pdev_setup(struct brcmf_if *ifp, bool ongoing)
  */
 void brcmf_fweh_attach(struct brcmf_pub *drvr)
 {
-	struct brcmf_fweh_info *fweh = &drvr->fweh;
+	struct brcmf_fweh_info *fweh;
+
+	drvr->fweh = kzalloc(sizeof(*drvr->fweh), GFP_KERNEL);
+	if (!drvr->fweh) {
+		bphy_err(drvr, "failed to allocate firmware event handler\n");
+		return;
+	}
+
+	fweh = drvr->fweh;
+	fweh->drvr = drvr;
 	INIT_WORK(&fweh->event_work, brcmf_fweh_event_worker);
 	spin_lock_init(&fweh->evt_q_lock);
 	INIT_LIST_HEAD(&fweh->event_q);
@@ -349,7 +358,10 @@ void brcmf_fweh_attach(struct brcmf_pub *drvr)
  */
 void brcmf_fweh_detach(struct brcmf_pub *drvr)
 {
-	struct brcmf_fweh_info *fweh = &drvr->fweh;
+	struct brcmf_fweh_info *fweh = drvr->fweh;
+
+	if (!fweh)
+		return;
 
 	/* cancel the worker if initialized */
 	if (fweh->event_work.func) {
@@ -357,6 +369,8 @@ void brcmf_fweh_detach(struct brcmf_pub *drvr)
 		WARN_ON(!list_empty(&fweh->event_q));
 		memset(fweh->evt_handler, 0, sizeof(fweh->evt_handler));
 	}
+	drvr->fweh = NULL;
+	kfree(fweh);
 }
 
 /**
@@ -369,11 +383,14 @@ void brcmf_fweh_detach(struct brcmf_pub *drvr)
 int brcmf_fweh_register(struct brcmf_pub *drvr, enum brcmf_fweh_event_code code,
 			brcmf_fweh_handler_t handler)
 {
-	if (drvr->fweh.evt_handler[code]) {
+	if (!drvr->fweh)
+		return -ENODEV;
+
+	if (drvr->fweh->evt_handler[code]) {
 		bphy_err(drvr, "event code %d already registered\n", code);
 		return -ENOSPC;
 	}
-	drvr->fweh.evt_handler[code] = handler;
+	drvr->fweh->evt_handler[code] = handler;
 	brcmf_dbg(TRACE, "event handler registered for %s\n",
 		  brcmf_fweh_event_name(code));
 	return 0;
@@ -390,7 +407,8 @@ void brcmf_fweh_unregister(struct brcmf_pub *drvr,
 {
 	brcmf_dbg(TRACE, "event handler cleared for %s\n",
 		  brcmf_fweh_event_name(code));
-	drvr->fweh.evt_handler[code] = NULL;
+	if (drvr->fweh)
+		drvr->fweh->evt_handler[code] = NULL;
 }
 
 /**
@@ -411,7 +429,7 @@ int brcmf_fweh_activate_events(struct brcmf_if *ifp)
 		return -ENOMEM;
 
 	for (i = 0; i < BRCMF_E_LAST; i++) {
-		if (ifp->drvr->fweh.evt_handler[i]) {
+		if (ifp->drvr->fweh->evt_handler[i]) {
 			brcmf_dbg(EVENT, "enable event %s\n",
 				  brcmf_fweh_event_name(i));
 			setbit(eventmask_msg->mask, i);
@@ -457,7 +475,7 @@ void brcmf_fweh_process_event(struct brcmf_pub *drvr,
 			      u32 packet_len, gfp_t gfp)
 {
 	enum brcmf_fweh_event_code code;
-	struct brcmf_fweh_info *fweh = &drvr->fweh;
+	struct brcmf_fweh_info *fweh = drvr->fweh;
 	struct brcmf_fweh_queue_item *event;
 	void *data;
 	u32 datalen;
@@ -468,6 +486,9 @@ void brcmf_fweh_process_event(struct brcmf_pub *drvr,
 	data = &event_packet[1];
 
 	if (code >= BRCMF_E_LAST)
+		return;
+
+	if (!fweh)
 		return;
 
 	if (code != BRCMF_E_IF && !fweh->evt_handler[code])

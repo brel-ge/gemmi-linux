@@ -223,7 +223,7 @@
 	};
 };
 
-&csi1_bridge {
+&csi {
 	fsl,mipi-mode;
 	status = "okay";
 	port {
@@ -297,7 +297,7 @@
 	status = "disabled";
 };
 
-&gpu {
+&gpu_3d {
 	/*
 	 * Use a table to set a fixed amount of contiguous memory used by the GPU
 	 * per memory configuration. This way we leave plenty of room for the
@@ -312,6 +312,10 @@
 		0x0 0x80000000 0x0 0x10000000	/* 2 GB variants   -> 256 MB of GPU CMA */
 		0x1 0x00000000 0x0 0x20000000	/* 4 GB variants   -> 512 MB of GPU CMA */
 	>;
+	status = "okay";
+};
+
+&gpu_2d {
 	status = "okay";
 };
 
@@ -608,7 +612,7 @@
 	};
 };
 
-&mipi_csi_1 {
+&mipi_csi {
 	#address-cells = <1>;
 	#size-cells = <0>;
 	status = "okay";
@@ -641,13 +645,11 @@
 			attach-bridge;
 		};
 	};
+};
 
-	port@2 {
-		mipi_dsi_out: endpoint {
-			attach-bridge;
-			remote-endpoint = <&bridge_in_dsi>;
-		};
-	};
+&mipi_dsi_out {
+	attach-bridge;
+	remote-endpoint = <&bridge_in_dsi>;
 };
 
 &pwm2 {

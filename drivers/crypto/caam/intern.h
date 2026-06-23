@@ -121,6 +121,7 @@ struct caam_drv_private {
 	u8 mc_en;		/* Nonzero if MC f/w is active */
 	u8 scu_en;		/* Nonzero if SCU f/w is active */
 	u8 optee_en;		/* Nonzero if OP-TEE f/w is active */
+	u8 no_page0;		/* Nonzero if register page 0 is not controlled by Linux */
 	bool pr_support;        /* RNG prediction resistance available */
 	int virt_en;		/* Virtualization enabled in CAAM */
 	int era;		/* CAAM Era (internal HW revision) */
@@ -244,7 +245,7 @@ static inline int caam_prng_register(struct device *dev)
 static inline void caam_prng_unregister(void *data) {}
 #endif /* CONFIG_CRYPTO_DEV_FSL_CAAM_PRNG_API */
 
-#ifdef CONFIG_CAAM_QI
+#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI
 
 int caam_qi_algapi_init(struct device *dev);
 void caam_qi_algapi_exit(void);
@@ -260,7 +261,43 @@ static inline void caam_qi_algapi_exit(void)
 {
 }
 
-#endif /* CONFIG_CAAM_QI */
+#endif /* CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI */
+
+#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_SM
+
+int caam_sm_startup(struct device *dev);
+void caam_sm_shutdown(struct device *dev);
+
+#else
+
+static inline int caam_sm_startup(struct device *dev)
+{
+	return 0;
+}
+
+static inline void caam_sm_shutdown(struct device *dev)
+{
+}
+
+#endif /* CONFIG_CRYPTO_DEV_FSL_CAAM_SM */
+
+#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_TK_API
+
+int caam_keygen_init(void);
+void caam_keygen_exit(void);
+
+#else
+
+static inline int caam_keygen_init(void)
+{
+	return 0;
+}
+
+static inline void caam_keygen_exit(void)
+{
+}
+
+#endif /* CONFIG_CRYPTO_DEV_FSL_CAAM_TK_API */
 
 #ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_SM
 

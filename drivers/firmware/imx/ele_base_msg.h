@@ -30,27 +30,27 @@
 #define ELE_DEV_INFO_EXTRA_SZ		0x60
 
 struct dev_info {
-	u8  cmd;
-	u8  ver;
-	u16 length;
-	u16 soc_id;
-	u16 soc_rev;
-	u16 lmda_val;
-	u8  ssm_state;
-	u8  dev_atts_api_ver;
-	u8  uid[MAX_UID_SIZE];
-	u8  sha_rom_patch[DEV_GETINFO_ROM_PATCH_SHA_SZ];
-	u8  sha_fw[DEV_GETINFO_FW_SHA_SZ];
+	uint8_t  cmd;
+	uint8_t  ver;
+	uint16_t length;
+	uint16_t soc_id;
+	uint16_t soc_rev;
+	uint16_t lmda_val;
+	uint8_t  ssm_state;
+	uint8_t  dev_atts_api_ver;
+	uint8_t  uid[MAX_UID_SIZE];
+	uint8_t  sha_rom_patch[DEV_GETINFO_ROM_PATCH_SHA_SZ];
+	uint8_t  sha_fw[DEV_GETINFO_FW_SHA_SZ];
 };
 
 struct dev_addn_info {
-	u8  oem_srkh[DEV_GETINFO_OEM_SRKH_SZ];
-	u8  trng_state;
-	u8  csal_state;
-	u8  imem_state;
-	u8  reserved2;
-	u8  oem_pqc_srkh[DEV_GETINFO_OEM_SRKH_SZ];
-	u8  reserved3[32];
+	uint8_t  oem_srkh[DEV_GETINFO_OEM_SRKH_SZ];
+	uint8_t  trng_state;
+	uint8_t  csal_state;
+	uint8_t  imem_state;
+	uint8_t  reserved2;
+	uint8_t  oem_pqc_srkh[DEV_GETINFO_OEM_SRKH_SZ];
+	uint8_t  reserved3[32];
 };
 
 struct ele_dev_info {
@@ -103,6 +103,7 @@ struct ele_dev_info {
 #define ELE_READ_FUSE_REQ		0x97
 #define ELE_READ_FUSE_REQ_MSG_SZ	0x08
 #define ELE_READ_FUSE_RSP_MSG_SZ	0x0C
+#define ELE_READ_FUSE_RSP_MSG_SZ_CRC	0x10
 #define ELE_READ_FUSE_OTP_UNQ_ID_RSP_MSG_SZ \
 					0x1C
 
@@ -124,6 +125,10 @@ struct ele_dev_info {
 #define ELE_GET_FW_VERSION_REQ_SZ	0x04
 #define ELE_GET_FW_VERSION_RSP_SZ	0x10
 
+#define ELE_FW_VERSION_MASK		0xFFFFFF
+#define ELE_FW_VERSION_2_0_6		0x020006
+u32 get_ele_fw_vers_word(void);
+
 int ele_get_info(struct se_if_priv *priv, struct ele_dev_info *s_info);
 int ele_fetch_soc_info(struct se_if_priv *priv, void *data);
 int ele_ping(struct se_if_priv *priv);
@@ -133,11 +138,11 @@ int ele_service_swap(struct se_if_priv *priv,
 int ele_fw_authenticate(struct se_if_priv *priv, phys_addr_t addr);
 int ele_debug_dump(struct se_if_priv *priv);
 int ele_start_rng(struct se_if_priv *priv);
-int ele_write_fuse(struct se_if_priv *priv, u16 fuse_index,
+int ele_write_fuse(struct se_if_priv *priv, uint16_t fuse_index,
 		   u32 value, bool block);
-int ele_voltage_change_req(struct se_if_priv *priv, bool start);
+int ele_voltage_change_req(struct se_if_priv *priv, bool start, bool enforce_fl_ctrl);
 int read_common_fuse(struct se_if_priv *priv,
-		     u16 fuse_id, u32 *value);
+		     uint16_t fuse_id, u32 *value);
 int ele_get_v2x_fw_state(struct se_if_priv *priv, uint32_t *state);
 int ele_v2x_fw_authenticate(struct se_if_priv *priv, phys_addr_t addr);
 int ele_get_fw_version(struct se_if_priv *priv, u32 *fw_ver_word,

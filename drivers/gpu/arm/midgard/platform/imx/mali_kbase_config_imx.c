@@ -2,7 +2,7 @@
 /*
  *
  * COPYRIGHT 2015-2023 ARM Limited. All rights reserved.
- * COPYRIGHT 2023 NXP
+ * COPYRIGHT 2023, 2025 - 2026 NXP
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -20,6 +20,7 @@
  *
  */
 
+#include <linux/version.h>
 #include <linux/of_address.h>
 #include <mali_kbase.h>
 #include <mali_kbase_config.h>
@@ -49,8 +50,11 @@ static int platform_init_func(struct kbase_device *kbdev)
 {
 	struct imx_platform_ctx *ictx;
 	struct platform_device *pdev;
+	struct kbase_pm_callback_conf *callbacks;
+
 
 	pdev = to_platform_device(kbdev->dev);
+	callbacks = (struct kbase_pm_callback_conf *)POWER_MANAGEMENT_CALLBACKS;
 
 	ictx = devm_kzalloc(kbdev->dev, sizeof(struct imx_platform_ctx), GFP_KERNEL);
 	if (pdev->num_resources > 1) {
@@ -72,6 +76,11 @@ static int platform_init_func(struct kbase_device *kbdev)
 	ictx->kbdev = kbdev;
 	kbdev->platform_context = ictx;
 	imx_waveform_start(kbdev);
+
+	if (of_machine_is_compatible("fsl,imx952")) {
+		callbacks->power_runtime_on_callback = NULL;
+		callbacks->power_runtime_off_callback = NULL;
+	}
 
 	return 0;
 }

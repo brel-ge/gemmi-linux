@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0+
 
 /*
- * Copyright 2017-2020,2022,2023,2025 NXP
+ * Copyright 2017-2020,2022,2023,2025,2026 NXP
  */
 
 #include <linux/list.h>
-#include <linux/of.h>
-#include <linux/of_graph.h>
 #include <linux/slab.h>
 #include <linux/sort.h>
 
@@ -17,6 +15,7 @@
 #include <drm/drm_bridge_connector.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_framebuffer_helper.h>
+#include <drm/drm_managed.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
 
@@ -66,9 +65,9 @@ dpu95_atomic_set_top_plane_per_crtc(struct drm_plane_state **plane_states, int n
 	}
 }
 
-static int dpu95_plane_alloc_hscaler(struct drm_plane *plane,
-				     struct dpu95_fetchunit *fu,
-				     unsigned int stream_id)
+static struct dpu95_hscaler *
+dpu95_plane_alloc_hscaler(struct drm_plane *plane, struct dpu95_fetchunit *fu,
+			  unsigned int stream_id)
 {
 	struct dpu95_plane *dplane = to_dpu95_plane(plane);
 	const struct dpu95_fetchunit_ops *fu_ops;
@@ -78,7 +77,7 @@ static int dpu95_plane_alloc_hscaler(struct drm_plane *plane,
 	if (dplane->grp->hs_used) {
 		dpu95_plane_dbg(plane, "failed to alloc HScaler on stream%u\n",
 				stream_id);
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	fu_ops = dpu95_fu_get_ops(fu);
@@ -91,17 +90,17 @@ static int dpu95_plane_alloc_hscaler(struct drm_plane *plane,
 		dpu95_plane_dbg(plane,
 				"failed to hot migrate HScaler to stream%u\n",
 				stream_id);
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	dplane->grp->hs_used = true;
 
-	return 0;
+	return hs;
 }
 
-static int dpu95_plane_alloc_vscaler(struct drm_plane *plane,
-				     struct dpu95_fetchunit *fu,
-				     unsigned int stream_id)
+static struct dpu95_vscaler *
+dpu95_plane_alloc_vscaler(struct drm_plane *plane, struct dpu95_fetchunit *fu,
+			  unsigned int stream_id)
 {
 	struct dpu95_plane *dplane = to_dpu95_plane(plane);
 	const struct dpu95_fetchunit_ops *fu_ops;
@@ -111,7 +110,7 @@ static int dpu95_plane_alloc_vscaler(struct drm_plane *plane,
 	if (dplane->grp->vs_used) {
 		dpu95_plane_dbg(plane, "failed to alloc VScaler on stream%u\n",
 				stream_id);
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	fu_ops = dpu95_fu_get_ops(fu);
@@ -124,12 +123,12 @@ static int dpu95_plane_alloc_vscaler(struct drm_plane *plane,
 		dpu95_plane_dbg(plane,
 				"failed to hot migrate VScaler to stream%u\n",
 				stream_id);
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	dplane->grp->vs_used = true;
 
-	return 0;
+	return vs;
 }
 
 static int
@@ -138,6 +137,9 @@ dpu95_atomic_assign_plane_source_per_crtc(struct dpu95_crtc *dpu_crtc,
 					  int n, bool use_current_source)
 {
 	const struct dpu95_fetchunit_ops *fu_ops;
+	struct drm_crtc *crtc = &dpu_crtc->base;
+	struct drm_device *drm = crtc->dev;
+	struct dpu95_drm_device *dpu_drm = to_dpu95_drm_device(drm);
 	unsigned int sid = dpu_crtc->stream_id;
 	struct drm_plane_state *plane_state;
 	struct dpu95_plane_state *dpstate;
@@ -149,6 +151,8 @@ dpu95_atomic_assign_plane_source_per_crtc(struct dpu95_crtc *dpu_crtc,
 	struct dpu95_plane *dplane;
 	struct drm_framebuffer *fb;
 	struct dpu95_fetchunit *fu;
+	struct dpu95_hscaler *hs;
+	struct dpu95_vscaler *vs;
 	struct drm_plane *plane;
 	bool fb_is_packed_yuv422;
 	struct list_head *node;
@@ -158,7 +162,6 @@ dpu95_atomic_assign_plane_source_per_crtc(struct dpu95_crtc *dpu_crtc,
 	bool need_vs;
 	u32 cap_mask;
 	int i, j;
-	int ret;
 
 	/* for active planes only */
 	for (i = 0; i < n; i++) {
@@ -229,15 +232,19 @@ dpu95_atomic_assign_plane_source_per_crtc(struct dpu95_crtc *dpu_crtc,
 				continue;
 
 			if (need_hs) {
-				ret = dpu95_plane_alloc_hscaler(plane, fu, sid);
-				if (ret)
-					return ret;
+				hs = dpu95_plane_alloc_hscaler(plane, fu, sid);
+				if (IS_ERR(hs))
+					return PTR_ERR(hs);
+
+				dpstate->hs = hs;
 			}
 
 			if (need_vs) {
-				ret = dpu95_plane_alloc_vscaler(plane, fu, sid);
-				if (ret)
-					return ret;
+				vs = dpu95_plane_alloc_vscaler(plane, fu, sid);
+				if (IS_ERR(vs))
+					return PTR_ERR(vs);
+
+				dpstate->vs = vs;
 			}
 
 			fu_ops->set_inavailable(fu);
@@ -256,7 +263,7 @@ dpu95_atomic_assign_plane_source_per_crtc(struct dpu95_crtc *dpu_crtc,
 
 		/* assign stage and blend */
 		if (sid) {
-			j = DPU95_HW_PLANES - (n - i);
+			j = dpu_drm->dpu_hw_plane_cnt - (n - i);
 			blend = res->lb[j];
 			if (i == 0)
 				stage.cf = grp->cf[sid];
@@ -281,6 +288,7 @@ static int dpu95_atomic_assign_plane_source(struct drm_atomic_state *state,
 					    u32 crtc_mask_prone_to_put,
 					    bool prone_to_put)
 {
+	struct dpu95_drm_device *dpu_drm = to_dpu95_drm_device(state->dev);
 	struct drm_plane_state **plane_states;
 	struct drm_crtc_state *crtc_state;
 	struct dpu95_crtc *dpu_crtc;
@@ -301,7 +309,7 @@ static int dpu95_atomic_assign_plane_source(struct drm_atomic_state *state,
 
 		dpu_crtc = to_dpu95_crtc(crtc);
 
-		plane_states = kmalloc_array(DPU95_HW_PLANES,
+		plane_states = kmalloc_array(dpu_drm->dpu_hw_plane_cnt,
 					     sizeof(*plane_states), GFP_KERNEL);
 		if (!plane_states) {
 			ret = -ENOMEM;
@@ -404,7 +412,6 @@ static int dpu95_drm_atomic_check(struct drm_device *dev,
 	struct dpu95_plane_grp *plane_grp = &dpu_drm->dpu_plane_grp;
 	const struct dpu95_fetchunit_ops *fu_ops;
 	struct drm_crtc_state *crtc_state;
-	struct dpu95_crtc *dpu_crtc;
 	struct dpu95_fetchunit *fu;
 	u32 crtc_mask_prone_to_put;
 	u32 crtc_mask_in_state = 0;
@@ -417,11 +424,8 @@ static int dpu95_drm_atomic_check(struct drm_device *dev,
 		return ret;
 
 	/* Set crtc_mask_in_state. */
-	for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
-		dpu_crtc = to_dpu95_crtc(crtc);
-
+	for_each_new_crtc_in_state(state, crtc, crtc_state, i)
 		crtc_mask_in_state |= drm_crtc_mask(crtc);
-	}
 
 	/*
 	 * Those CRTCs not in the state for check are prone to put,
@@ -515,29 +519,24 @@ static int dpu95_kms_init_encoder_per_crtc(struct dpu95_drm_device *dpu_drm,
 {
 	struct drm_device *drm = &dpu_drm->base;
 	struct drm_crtc *crtc = &dpu_crtc->base;
-	struct device_node *ep, *remote;
 	struct drm_connector *connector;
 	struct drm_encoder *encoder;
 	struct drm_bridge *bridge;
-	int ret = 0;
+	int ret;
 
-	ep = of_get_next_child(dpu_crtc->np, NULL);
-	if (!ep) {
-		drm_err(drm, "failed to find CRTC(%pOF) port's endpoint\n",
-			dpu_crtc->np);
-		return -ENODEV;
-	}
-
-	remote = of_graph_get_remote_port_parent(ep);
-	if (!of_device_is_available(remote))
-		goto out;
-
-	bridge = of_drm_find_bridge(remote);
+	bridge = devm_drm_of_get_bridge(drm->dev, drm->dev->of_node,
+					dpu_crtc->stream_id, 0);
 	if (!bridge) {
 		ret = -EPROBE_DEFER;
 		drm_dbg_kms(drm, "failed to find bridge for stream%u: %d\n",
 			    dpu_crtc->stream_id, ret);
 		goto out;
+	} else if (IS_ERR(bridge)) {
+		ret = PTR_ERR(bridge);
+		if (ret == -ENODEV)
+			return 0;
+		else
+			return ret;
 	}
 
 	encoder = &dpu_drm->encoder[dpu_crtc->stream_id];
@@ -573,13 +572,12 @@ static int dpu95_kms_init_encoder_per_crtc(struct dpu95_drm_device *dpu_drm,
 			dpu_crtc->stream_id, ret);
 
 out:
-	of_node_put(remote);
-	of_node_put(ep);
 	return ret;
 }
 
 int dpu95_kms_prepare(struct dpu95_drm_device *dpu_drm)
 {
+	struct dpu95_soc *dpu = &dpu_drm->dpu_soc;
 	struct drm_device *drm = &dpu_drm->base;
 	struct dpu95_plane *dpu_overlay;
 	struct dpu95_crtc *dpu_crtc;
@@ -608,7 +606,15 @@ int dpu95_kms_prepare(struct dpu95_drm_device *dpu_drm)
 			return ret;
 	}
 
-	for (i = 0; i < DPU95_OVERLAYS; i++) {
+	dpu_drm->dpu_hw_plane_cnt = dpu->fl_cnt + dpu->fy_cnt;
+	dpu_drm->dpu_overlay_cnt = dpu_drm->dpu_hw_plane_cnt - 1;
+	dpu_drm->dpu_overlay = drmm_kcalloc(drm, dpu_drm->dpu_overlay_cnt,
+					    sizeof(struct dpu95_plane),
+					    GFP_KERNEL);
+	if (!dpu_drm->dpu_overlay)
+		return -ENOMEM;
+
+	for (i = 0; i < dpu_drm->dpu_overlay_cnt; i++) {
 		dpu_overlay = &dpu_drm->dpu_overlay[i];
 
 		ret = dpu95_plane_initialize(dpu_drm, dpu_overlay,

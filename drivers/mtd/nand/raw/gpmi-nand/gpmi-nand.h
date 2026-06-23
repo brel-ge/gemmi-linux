@@ -79,8 +79,6 @@ enum gpmi_type {
 	IS_MX6QP,
 	IS_MX6SX,
 	IS_MX7D,
-	IS_MX6UL,
-	IS_MX6ULL,
 	IS_MX8QXP,
 };
 
@@ -90,6 +88,7 @@ struct gpmi_devdata {
 	int max_chain_delay; /* See the SDR EDO mode */
 	const char * const *clks;
 	const int clks_count;
+	bool support_edo_timing;
 };
 
 /**
@@ -126,6 +125,7 @@ struct gpmi_nand_data {
 	/* System Interface */
 	struct device		*dev;
 	struct platform_device	*pdev;
+	struct device_link	*link;
 
 	/* Resources */
 	struct resources	resources;

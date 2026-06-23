@@ -1,75 +1,97 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
 /*
- * NETC NTMP (NETC Table Management Protocol) 2.0 driver
- * Copyright 2023 NXP
- * Copyright (c) 2023 Wei Fang <wei.fang@nxp.com>
+ * NETC NTMP (NETC Table Management Protocol) 2.0 Library
+ * Copyright 2025 NXP
  */
+
+#include <linux/dma-mapping.h>
+#include <linux/fsl/netc_global.h>
 #include <linux/iopoll.h>
 
-#include "ntmp_formats.h"
+#include "ntmp_private.h"
+
+#define NETC_CBDR_TIMEOUT		1000 /* us */
+#define NETC_CBDR_DELAY_US		10
+#define NETC_CBDR_MR_EN			BIT(31)
+
+#define NTMP_BASE_ADDR_ALIGN		128
+#define NTMP_DATA_ADDR_ALIGN		32
 
 /* Define NTMP Table ID */
 #define NTMP_MAFT_ID			1
-#define NTMP_VAFT_ID			2
 #define NTMP_RSST_ID			3
+#define NTMP_RFST_ID			4
 #define NTMP_TGST_ID			5
 #define NTMP_RPT_ID			10
 #define NTMP_IPFT_ID			13
+#define NTMP_FDBT_ID			15
+#define NTMP_VFT_ID			18
 #define NTMP_ISIT_ID			30
 #define NTMP_IST_ID			31
 #define NTMP_ISFT_ID			32
+#define NTMP_ETT_ID			33
+#define NTMP_ISGT_ID			34
+#define NTMP_ESRT_ID			35
 #define NTMP_SGIT_ID			36
 #define NTMP_SGCLT_ID			37
 #define NTMP_ISCT_ID			38
+#define NTMP_ECT_ID			39
+#define NTMP_FMT_ID			40
+#define NTMP_BPT_ID			41
+#define NTMP_SBPT_ID			42
+#define NTMP_FMDT_ID			44
 
-/* Define NTMP Access Method */
-#define NTMP_AM_ENTRY_ID		0
-#define NTMP_AM_EXACT_KEY		1
-#define NTMP_AM_SEARCH			2
-#define NTMP_AM_TERNARY_KEY		3
+/* Generic Update Actions for most tables */
+#define NTMP_GEN_UA_CFGEU		BIT(0)
+#define NTMP_GEN_UA_STSEU		BIT(1)
 
-/* Define NTMP Header Version */
-#define NTMP_HEADER_VERSION2		2
+/* Update Actions for specific tables */
+#define RPT_UA_FEEU			BIT(1)
+#define RPT_UA_PSEU			BIT(2)
+#define RPT_UA_STSEU			BIT(3)
+#define SGIT_UA_ACFGEU			BIT(0)
+#define SGIT_UA_CFGEU			BIT(1)
+#define SGIT_UA_SGISEU			BIT(2)
+#define FDBT_UA_ACTEU			BIT(1)
+#define ESRT_UA_SRSEU			BIT(2)
+#define ECT_UA_STSEU			BIT(0)
+#define BPT_UA_BPSEU			BIT(1)
+#define SBPT_UA_BPSEU			BIT(1)
+#define ISGT_UA_SGSEU			BIT(1)
 
-/* Define NTMP Protocol Format */
-#define NTMP_REQ_HDR_NPF		BIT(15)
+/* Quary Action: 0: Full query, 1: Only query entry ID */
+#define NTMP_QA_ENTRY_ID		1
 
-#define NTMP_RESP_LEN_MASK		GENMASK(19, 0)
-#define NTMP_REQ_LEN_MASK		GENMASK(31, 20)
+#define NTMP_ENTRY_ID_SIZE		4
+#define RSST_ENTRY_NUM			64
+#define RSST_STSE_DATA_SIZE(n)		((n) * 8)
+#define RSST_CFGE_DATA_SIZE(n)		(n)
+#define SGCLT_MAX_GE_NUM		256
 
-#define ENETC_STREAM_GATE_STATE_CLOSE	0
-#define ENETC_STREAM_GATE_STATE_OPEN	1
-
-#define ENETC_NTMP_ENTRY_ID_SIZE	4
-
-#define ENETC_RSS_TABLE_ENTRY_NUM	64
-#define ENETC_RSS_CFGEU			BIT(0)
-#define ENETC_RSS_STSEU			BIT(1)
-#define ENETC_RSS_STSE_DATA_SIZE(n)	((n) * 8)
-#define ENETC_RSS_CFGE_DATA_SIZE(n)	(n)
-
-#define NTMP_REQ_RESP_LEN(req, resp)	(((req) << 20 & NTMP_REQ_LEN_MASK) | \
-					 ((resp) & NTMP_RESP_LEN_MASK))
-
-static inline u32 netc_cbdr_read(void __iomem *reg)
+void ntmp_enable_cbdr(struct netc_cbdr *cbdr)
 {
-	return ioread32(reg);
+	cbdr->next_to_clean = netc_read(cbdr->regs.cir);
+	cbdr->next_to_use = netc_read(cbdr->regs.pir);
+
+	/* Step 1: Configure the base address of the Control BD Ring */
+	netc_write(cbdr->regs.bar0, lower_32_bits(cbdr->dma_base_align));
+	netc_write(cbdr->regs.bar1, upper_32_bits(cbdr->dma_base_align));
+
+	/* Step 2: Configure the number of BDs of the Control BD Ring */
+	netc_write(cbdr->regs.lenr, cbdr->bd_num);
+
+	/* Step 3: Enable the Control BD Ring */
+	netc_write(cbdr->regs.mr, NETC_CBDR_MR_EN);
 }
+EXPORT_SYMBOL_GPL(ntmp_enable_cbdr);
 
-static inline void netc_cbdr_write(void __iomem *reg, u32 val)
+int ntmp_init_cbdr(struct netc_cbdr *cbdr, struct device *dev,
+		   const struct netc_cbdr_regs *regs)
 {
-	iowrite32(val, reg);
-}
+	int cbd_num = NETC_CBDR_BD_NUM;
+	size_t size;
 
-int netc_setup_cbdr(struct device *dev, int cbd_num,
-		    struct netc_cbdr_regs *regs,
-		    struct netc_cbdr *cbdr)
-{
-	int size;
-
-	size = cbd_num * sizeof(union netc_cbd) +
-	       NETC_CBDR_BASE_ADDR_ALIGN;
-
+	size = cbd_num * sizeof(union netc_cbd) + NTMP_BASE_ADDR_ALIGN;
 	cbdr->addr_base = dma_alloc_coherent(dev, size, &cbdr->dma_base,
 					     GFP_KERNEL);
 	if (!cbdr->addr_base)
@@ -78,69 +100,50 @@ int netc_setup_cbdr(struct device *dev, int cbd_num,
 	cbdr->dma_size = size;
 	cbdr->bd_num = cbd_num;
 	cbdr->regs = *regs;
-	cbdr->dma_dev = dev;
+	cbdr->dev = dev;
 
 	/* The base address of the Control BD Ring must be 128 bytes aligned */
-	cbdr->dma_base_align =  ALIGN(cbdr->dma_base,
-				      NETC_CBDR_BASE_ADDR_ALIGN);
+	cbdr->dma_base_align =  ALIGN(cbdr->dma_base,  NTMP_BASE_ADDR_ALIGN);
 	cbdr->addr_base_align = PTR_ALIGN(cbdr->addr_base,
-					  NETC_CBDR_BASE_ADDR_ALIGN);
+					  NTMP_BASE_ADDR_ALIGN);
 
-	cbdr->next_to_clean = 0;
-	cbdr->next_to_use = 0;
 	spin_lock_init(&cbdr->ring_lock);
 
-	/* Step 1: Configure the base address of the Control BD Ring */
-	netc_cbdr_write(cbdr->regs.bar0, lower_32_bits(cbdr->dma_base_align));
-	netc_cbdr_write(cbdr->regs.bar1, upper_32_bits(cbdr->dma_base_align));
-
-	/* Step 2: Configure the producer index register */
-	netc_cbdr_write(cbdr->regs.pir, cbdr->next_to_clean);
-
-	/* Step 3: Configure the consumer index register */
-	netc_cbdr_write(cbdr->regs.cir, cbdr->next_to_use);
-
-	/* Step4: Configure the number of BDs of the Control BD Ring */
-	netc_cbdr_write(cbdr->regs.lenr, cbdr->bd_num);
-
-	/* Step 5: Enable the Control BD Ring */
-	netc_cbdr_write(cbdr->regs.mr, NETC_CBDRMR_EN);
+	ntmp_enable_cbdr(cbdr);
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(netc_setup_cbdr);
+EXPORT_SYMBOL_GPL(ntmp_init_cbdr);
 
-void netc_free_cbdr(struct netc_cbdr *cbdr)
+void ntmp_free_cbdr(struct netc_cbdr *cbdr)
 {
 	/* Disable the Control BD Ring */
-	netc_cbdr_write(cbdr->regs.mr, 0);
-
-	dma_free_coherent(cbdr->dma_dev, cbdr->dma_size,
-			  cbdr->addr_base, cbdr->dma_base);
-
+	netc_write(cbdr->regs.mr, 0);
+	dma_free_coherent(cbdr->dev, cbdr->dma_size, cbdr->addr_base,
+			  cbdr->dma_base);
 	memset(cbdr, 0, sizeof(*cbdr));
 }
-EXPORT_SYMBOL_GPL(netc_free_cbdr);
+EXPORT_SYMBOL_GPL(ntmp_free_cbdr);
 
-static inline int netc_get_free_cbd_num(struct netc_cbdr *cbdr)
+static int ntmp_get_free_cbd_num(struct netc_cbdr *cbdr)
 {
-	return (cbdr->next_to_clean - cbdr->next_to_use - 1 + cbdr->bd_num) %
-		cbdr->bd_num;
+	return (cbdr->next_to_clean - cbdr->next_to_use - 1 +
+		cbdr->bd_num) % cbdr->bd_num;
 }
 
-static inline union netc_cbd *netc_get_cbd(struct netc_cbdr *cbdr, int index)
+static union netc_cbd *ntmp_get_cbd(struct netc_cbdr *cbdr, int index)
 {
 	return &((union netc_cbd *)(cbdr->addr_base_align))[index];
 }
 
-static void netc_clean_cbdr(struct netc_cbdr *cbdr)
+static void ntmp_clean_cbdr(struct netc_cbdr *cbdr)
 {
 	union netc_cbd *cbd;
 	int i;
 
 	i = cbdr->next_to_clean;
-	while (netc_cbdr_read(cbdr->regs.cir) != i) {
-		cbd = netc_get_cbd(cbdr, i);
+	while (netc_read(cbdr->regs.cir) != i) {
+		cbd = ntmp_get_cbd(cbdr, i);
 		memset(cbd, 0, sizeof(*cbd));
 		i = (i + 1) % cbdr->bd_num;
 	}
@@ -148,1524 +151,1177 @@ static void netc_clean_cbdr(struct netc_cbdr *cbdr)
 	cbdr->next_to_clean = i;
 }
 
-static int netc_xmit_ntmp_cmd(struct netc_cbdr *cbdr, union netc_cbd *cbd)
+static struct netc_cbdr *netc_select_cbdr(struct ntmp_user *user)
 {
-	union netc_cbd *ring_cbd;
-	unsigned long flags;
+	int cpu, i;
+
+	for (i = 0; i < user->cbdr_num; i++) {
+		if (spin_is_locked(&user->ring[i].ring_lock))
+			continue;
+
+		return &user->ring[i];
+	}
+
+	/* If all the command BDRs are busy now, we select
+	 * one of them, but need to wait for a while to use.
+	 */
+	cpu = smp_processor_id();
+
+	return &user->ring[cpu % user->cbdr_num];
+}
+
+static int netc_xmit_ntmp_cmd_common(struct ntmp_user *user, union netc_cbd *cbd,
+				     bool is_v1)
+{
+	union netc_cbd *cur_cbd;
+	struct netc_cbdr *cbdr;
 	int i, err;
 	u16 status;
 	u32 val;
 
-	if (unlikely(!cbdr->addr_base))
-		return -EFAULT;
+	if (user->cbdr_num == 1)
+		cbdr = &user->ring[0];
+	else
+		cbdr = netc_select_cbdr(user);
 
-	spin_lock_irqsave(&cbdr->ring_lock, flags);
+	spin_lock_bh(&cbdr->ring_lock);
 
-	if (unlikely(!netc_get_free_cbd_num(cbdr)))
-		netc_clean_cbdr(cbdr);
+	if (unlikely(!ntmp_get_free_cbd_num(cbdr)))
+		ntmp_clean_cbdr(cbdr);
 
 	i = cbdr->next_to_use;
-	ring_cbd = netc_get_cbd(cbdr, i);
+	cur_cbd = ntmp_get_cbd(cbdr, i);
+	*cur_cbd = *cbd;
+	dma_wmb();
 
-	/* Copy command BD to the ring */
-	*ring_cbd = *cbd;
 	/* Update producer index of both software and hardware */
 	i = (i + 1) % cbdr->bd_num;
 	cbdr->next_to_use = i;
-	netc_cbdr_write(cbdr->regs.pir, i);
+	netc_write(cbdr->regs.pir, i);
 
-	err = read_poll_timeout_atomic(netc_cbdr_read, val, val == i,
-				       10, NETC_CBDR_TIMEOUT, true,
-				       cbdr->regs.cir);
-	if (unlikely(err)) {
-		err = -EBUSY;
-		goto err_unlock;
-	}
+	err = read_poll_timeout_atomic(netc_read, val, val == i,
+				       NETC_CBDR_DELAY_US, NETC_CBDR_TIMEOUT,
+				       true, cbdr->regs.cir);
+	if (unlikely(err))
+		goto cbdr_unlock;
+
+	dma_rmb();
+	/* Get the writeback command BD, because the caller may need
+	 * to check some other fields of the response header.
+	 */
+	*cbd = *cur_cbd;
 
 	/* Check the writeback error status */
-	status = le16_to_cpu(ring_cbd->ntmp_resp_hdr.error_rr) & NTMP_RESP_HDR_ERR;
+	if (is_v1)
+		status = cbd->req_v1.status_flags & NTMP_V1_RESP_STATUS;
+	else
+		status = le16_to_cpu(cbd->resp_hdr.error_rr) & NTMP_RESP_ERROR;
 	if (unlikely(status)) {
-		dev_err(cbdr->dma_dev, "Command BD error: 0x%04x\n", status);
 		err = -EIO;
+		dev_err(user->dev, "Command BD error: 0x%04x\n", status);
 	}
 
-	netc_clean_cbdr(cbdr);
+	ntmp_clean_cbdr(cbdr);
+	dma_wmb();
 
-err_unlock:
-	spin_unlock_irqrestore(&cbdr->ring_lock, flags);
+cbdr_unlock:
+	spin_unlock_bh(&cbdr->ring_lock);
 
 	return err;
 }
 
-static void *ntmp_alloc_data_mem(struct netc_cbdr *cbdr,
-				 int size, dma_addr_t *dma,
-				 void **data_align)
+static int netc_xmit_ntmp_cmd(struct ntmp_user *user, union netc_cbd *cbd)
 {
-	void *data;
-
-	data = dma_alloc_coherent(cbdr->dma_dev,
-				  size + NETC_CBD_DATA_ADDR_ALIGN,
-				  dma, GFP_ATOMIC);
-	if (!data) {
-		dev_err(cbdr->dma_dev, "NTMP alloc data memory failed!\n");
-		return NULL;
-	}
-	*data_align = PTR_ALIGN(data, NETC_CBD_DATA_ADDR_ALIGN);
-
-	return data;
+	return netc_xmit_ntmp_cmd_common(user, cbd, false);
 }
 
-static void ntmp_free_data_mem(struct netc_cbdr *cbdr, int size,
-			       void *data, dma_addr_t dma)
+u32 ntmp_lookup_free_eid(unsigned long *bitmap, u32 size)
 {
-	dma_free_coherent(cbdr->dma_dev, size + NETC_CBD_DATA_ADDR_ALIGN,
-			  data, dma);
+	u32 entry_id;
+
+	entry_id = find_first_zero_bit(bitmap, size);
+	if (entry_id == size)
+		return NTMP_NULL_ENTRY_ID;
+
+	/* Set the bit once we found it */
+	set_bit(entry_id, bitmap);
+
+	return entry_id;
+}
+EXPORT_SYMBOL_GPL(ntmp_lookup_free_eid);
+
+void ntmp_clear_eid_bitmap(unsigned long *bitmap, u32 entry_id)
+{
+	if (entry_id == NTMP_NULL_ENTRY_ID)
+		return;
+
+	clear_bit(entry_id, bitmap);
+}
+EXPORT_SYMBOL_GPL(ntmp_clear_eid_bitmap);
+
+u32 ntmp_lookup_free_words(unsigned long *bitmap, u32 size, u32 num_words)
+{
+	u32 entry_id, next_eid, num;
+
+	do {
+		entry_id = find_first_zero_bit(bitmap, size);
+		if (entry_id == size)
+			return NTMP_NULL_ENTRY_ID;
+
+		next_eid = find_next_bit(bitmap, size, entry_id + 1);
+		num = next_eid - entry_id;
+	} while (num < num_words && next_eid != size);
+
+	if (num < num_words)
+		return NTMP_NULL_ENTRY_ID;
+
+	bitmap_set(bitmap, entry_id, num_words);
+
+	return entry_id;
 }
 
-static inline void ntmp_fill_request_headr(union netc_cbd *cbd, dma_addr_t dma,
-					   int len, int table_id, int cmd,
-					   int access_method)
+void ntmp_clear_words_bitmap(unsigned long *bitmap, u32 entry_id, u32 num_words)
+{
+	if (entry_id == NTMP_NULL_ENTRY_ID)
+		return;
+
+	bitmap_clear(bitmap, entry_id, num_words);
+}
+
+static int ntmp_alloc_data_mem(struct ntmp_dma_buf *data, void **buf_align)
+{
+	void *buf;
+
+	buf = dma_alloc_coherent(data->dev, data->size + NTMP_DATA_ADDR_ALIGN,
+				 &data->dma, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	data->buf = buf;
+	*buf_align = PTR_ALIGN(buf, NTMP_DATA_ADDR_ALIGN);
+
+	return 0;
+}
+
+static void ntmp_free_data_mem(struct ntmp_dma_buf *data)
+{
+	dma_free_coherent(data->dev, data->size + NTMP_DATA_ADDR_ALIGN,
+			  data->buf, data->dma);
+}
+
+/* NTMP V1.0 functions */
+static int netc_xmit_ntmp_v1_cmd(struct ntmp_user *user, union netc_cbd *cbdv1)
+{
+	return netc_xmit_ntmp_cmd_common(user, cbdv1, true);
+}
+
+static inline int ntmp_v1_cbd_alloc_data_mem(struct ntmp_dma_buf *data,
+					     union netc_cbd *cbd,
+					     void **data_align)
+{
+	dma_addr_t dma_align;
+	int err;
+
+	err = ntmp_alloc_data_mem(data, data_align);
+	if (err)
+		return err;
+
+	dma_align = ALIGN(data->dma, NTMP_DATA_ADDR_ALIGN);
+
+	cbd->req_v1.addr = cpu_to_le64(dma_align);
+	cbd->req_v1.length = cpu_to_le16(data->size);
+
+	return 0;
+}
+
+int ntmp_v1_rfst_set_entry(struct ntmp_user *user, u32 entry_id,
+			   struct rfse_set_buff *rfse)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(*rfse),
+	};
+	union netc_cbd cbd = { .req_v1.cmd = 0 };
+	struct device *dev = user->dev;
+	void *tmp_align;
+	int err;
+
+	/* fill up the "set" descriptor */
+	cbd.req_v1.cmd = 0;
+	cbd.req_v1.cls = 4;
+	cbd.req_v1.index = cpu_to_le16(entry_id);
+	cbd.req_v1.opt[3] = cpu_to_le32(0); /* SI */
+
+	err = ntmp_v1_cbd_alloc_data_mem(&data, &cbd, &tmp_align);
+	if (err)
+		return err;
+
+	memcpy(tmp_align, rfse, sizeof(*rfse));
+
+	err = netc_xmit_ntmp_v1_cmd(user, &cbd);
+	if (err)
+		dev_err(dev, "Set table (id: %d) entry failed: %d!",
+			NTMP_RFST_ID, err);
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_v1_rfst_set_entry);
+
+int ntmp_v1_rfst_delete_entry(struct ntmp_user *user, u32 entry_id)
+{
+	struct rfse_set_buff rfse = { };
+
+	return ntmp_v1_rfst_set_entry(user, entry_id, &rfse);
+}
+EXPORT_SYMBOL_GPL(ntmp_v1_rfst_delete_entry);
+/* NTMP V1.0 functions end */
+
+static void ntmp_fill_request_hdr(union netc_cbd *cbd, dma_addr_t dma,
+				  int len, int table_id, int cmd,
+				  int access_method)
 {
 	dma_addr_t dma_align;
 
 	memset(cbd, 0, sizeof(*cbd));
-	dma_align = ALIGN(dma, NETC_CBD_DATA_ADDR_ALIGN);
-	cbd->ntmp_req_hdr.addr = cpu_to_le64(dma_align);
-	cbd->ntmp_req_hdr.len = cpu_to_le32(len);
-	cbd->ntmp_req_hdr.cmd = cmd;
-	cbd->ntmp_req_hdr.access_method = access_method;
-	cbd->ntmp_req_hdr.table_id = table_id;
-	cbd->ntmp_req_hdr.hdr_ver = NTMP_HEADER_VERSION2;
-	cbd->ntmp_req_hdr.cci = 0;
-	cbd->ntmp_req_hdr.rr = 0;	//Must be set to 0 by SW.
+	dma_align = ALIGN(dma, NTMP_DATA_ADDR_ALIGN);
+	cbd->req_hdr.addr = cpu_to_le64(dma_align);
+	cbd->req_hdr.len = cpu_to_le32(len);
+	cbd->req_hdr.cmd = cmd;
+	cbd->req_hdr.access_method = FIELD_PREP(NTMP_ACCESS_METHOD,
+						access_method);
+	cbd->req_hdr.table_id = table_id;
+	cbd->req_hdr.ver_cci_rr = FIELD_PREP(NTMP_HDR_VERSION,
+					     NTMP_HDR_VER2);
 	/* For NTMP version 2.0 or later version */
-	cbd->ntmp_req_hdr.npf = cpu_to_le32(NTMP_REQ_HDR_NPF);
+	cbd->req_hdr.npf = cpu_to_le32(NTMP_NPF);
 }
 
-int ntmp_maft_add_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			const char *mac_addr, int si_bitmap)
+static void ntmp_fill_crd(struct ntmp_cmn_req_data *crd, u8 tblv,
+			  u8 qa, u16 ua)
 {
-	struct maft_req_add *req;
+	crd->update_act = cpu_to_le16(ua);
+	crd->tblv_qact = NTMP_TBLV_QACT(tblv, qa);
+}
+
+static void ntmp_fill_crd_eid(struct ntmp_req_by_eid *rbe, u8 tblv,
+			      u8 qa, u16 ua, u32 entry_id)
+{
+	ntmp_fill_crd(&rbe->crd, tblv, qa, ua);
+	rbe->entry_id = cpu_to_le32(entry_id);
+}
+
+static const char *ntmp_table_name(int tbl_id)
+{
+	switch (tbl_id) {
+	case NTMP_MAFT_ID:
+		return "MAC Address Filter Table";
+	case NTMP_RSST_ID:
+		return "RSS Table";
+	case NTMP_RPT_ID:
+		return "Rate Policer Table";
+	case NTMP_ISIT_ID:
+		return "Ingress Stream Identification Table";
+	case NTMP_IST_ID:
+		return "Ingress Stream Table";
+	case NTMP_ISFT_ID:
+		return "Ingress Stream Filter Table";
+	case NTMP_SGIT_ID:
+		return "Stream Gate Instance Table";
+	case NTMP_SGCLT_ID:
+		return "Stream Gate Control List Table";
+	case NTMP_IPFT_ID:
+		return "Ingress Port Filter Table";
+	case NTMP_RFST_ID:
+		return "RFS Table";
+	case NTMP_FDBT_ID:
+		return "FDB Table";
+	case NTMP_ETT_ID:
+		return "Egress Treatment Table";
+	case NTMP_ESRT_ID:
+		return "Egress Sequence Recovery Table";
+	case NTMP_FMT_ID:
+		return "Frame Modification Table";
+	case NTMP_BPT_ID:
+		return "Buffer Pool Table";
+	case NTMP_SBPT_ID:
+		return "Shared Buffer Pool Table";
+	case NTMP_FMDT_ID:
+		return "Frame Modification Data Table";
+	default:
+		return "Unknown Table";
+	};
+}
+
+static int ntmp_delete_entry_by_id(struct ntmp_user *user, int tbl_id,
+				   u8 tbl_ver, u32 entry_id, u32 req_len,
+				   u32 resp_len)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = max(req_len, resp_len),
+	};
+	struct ntmp_req_by_eid *req;
 	union netc_cbd cbd;
-	u32 len, data_size;
-	dma_addr_t dma;
-	void *tmp;
 	int err;
 
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(req, tbl_ver, 0, 0, entry_id);
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(req_len, resp_len),
+			      tbl_id, NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to delete entry 0x%x of %s, err: %pe",
+			entry_id, ntmp_table_name(tbl_id), ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+
+static int ntmp_query_entry_by_id(struct ntmp_user *user, int tbl_id,
+				  u32 len, struct ntmp_req_by_eid *req,
+				  dma_addr_t dma, bool compare_eid)
+{
+	struct ntmp_cmn_resp_query *resp;
+	int cmd = NTMP_CMD_QUERY;
+	union netc_cbd cbd;
+	u32 entry_id;
+	int err;
+
+	entry_id = le32_to_cpu(req->entry_id);
+	if (le16_to_cpu(req->crd.update_act))
+		cmd = NTMP_CMD_QU;
+
+	/* Request header */
+	ntmp_fill_request_hdr(&cbd, dma, len, tbl_id, cmd, NTMP_AM_ENTRY_ID);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err) {
+		dev_err(user->dev,
+			"Failed to query entry 0x%x of %s, err: %pe\n",
+			entry_id, ntmp_table_name(tbl_id), ERR_PTR(err));
+		return err;
+	}
+
+	/* For a few tables, the first field of their response data is not
+	 * entry_id, so directly return success.
+	 */
+	if (!compare_eid)
+		return 0;
+
+	resp = (struct ntmp_cmn_resp_query *)req;
+	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
+		dev_err(user->dev,
+			"%s: query EID 0x%x doesn't match response EID 0x%x\n",
+			ntmp_table_name(tbl_id), entry_id, le32_to_cpu(resp->entry_id));
+		return -EIO;
+	}
+
+	return 0;
+}
+
+int ntmp_maft_add_entry(struct ntmp_user *user, u32 entry_id,
+			struct maft_entry_data *maft)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct maft_req_add),
+	};
+	struct maft_req_add *req;
+	union netc_cbd cbd;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
 	/* Set mac address filter table request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-	ether_addr_copy(req->keye.mac_addr, mac_addr);
-	req->cfge.si_bitmap = cpu_to_le16(si_bitmap);
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.maft_ver, 0, 0, entry_id);
+	req->keye = maft->keye;
+	req->cfge = maft->cfge;
 
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_MAFT_ID,
-				NTMP_CMD_ADD, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_MAFT_ID, NTMP_CMD_ADD, NTMP_AM_ENTRY_ID);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
 	if (err)
-		dev_err(cbdr->dma_dev, "Add MAC filter table entry failed (%d)!", err);
+		dev_err(user->dev, "Failed to add MAFT entry 0x%x, err: %pe\n",
+			entry_id, ERR_PTR(err));
 
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
 EXPORT_SYMBOL_GPL(ntmp_maft_add_entry);
 
-int ntmp_maft_query_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			  struct ntmp_mfe *entry)
+int ntmp_maft_query_entry(struct ntmp_user *user, u32 entry_id,
+			  struct maft_entry_data *maft)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct maft_resp_query),
+	};
 	struct maft_resp_query *resp;
-	struct maft_req_qd *req;
-	union netc_cbd cbd;
-	u32 len, data_size;
-	dma_addr_t dma;
-	void *tmp;
+	struct ntmp_req_by_eid *req;
 	int err;
 
-	if (!entry || entry_id == NTMP_NULL_ENTRY_ID)
-		return -EINVAL;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
-	data_size = sizeof(*resp);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Set mac address filter table request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_MAFT_ID,
-				NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev, "Query MAC filter table entry failed (%d)!", err);
+	ntmp_fill_crd_eid(req, user->tbl.maft_ver, 0, 0, entry_id);
+	err = ntmp_query_entry_by_id(user, NTMP_MAFT_ID,
+				     NTMP_LEN(sizeof(*req), data.size),
+				     req, data.dma, true);
+	if (err)
 		goto end;
-	}
 
 	resp = (struct maft_resp_query *)req;
-	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-		dev_err(cbdr->dma_dev,
-			"Entry ID doesn't match, query ID:0x%0x, response ID:0x%x\n",
-			entry_id, le32_to_cpu(resp->entry_id));
-		err = -EIO;
-		goto end;
-	}
-
-	ether_addr_copy(entry->mac, resp->keye.mac_addr);
-	entry->si_bitmap = le16_to_cpu(resp->cfge.si_bitmap);
+	maft->keye = resp->keye;
+	maft->cfge = resp->cfge;
 
 end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
 EXPORT_SYMBOL_GPL(ntmp_maft_query_entry);
 
-int ntmp_maft_delete_entry(struct netc_cbdr *cbdr, u32 entry_id)
+int ntmp_maft_delete_entry(struct ntmp_user *user, u32 entry_id)
 {
-	struct maft_req_qd *req;
-	union netc_cbd cbd;
-	u32 len, data_size;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
-
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Set mac address filter table request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_MAFT_ID,
-				NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev,
-			"Delete MAC filter table entry failed (%d)!", err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
+	return ntmp_delete_entry_by_id(user, NTMP_MAFT_ID, user->tbl.maft_ver,
+				       entry_id, NTMP_EID_REQ_LEN, 0);
 }
 EXPORT_SYMBOL_GPL(ntmp_maft_delete_entry);
 
-int ntmp_vaft_add_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			struct ntmp_vfe *vfe)
+int ntmp_rsst_update_entry(struct ntmp_user *user, const u32 *table,
+			   int count)
 {
-	struct vaft_req_add *req;
+	struct ntmp_dma_buf data = {.dev = user->dev};
+	struct rsst_req_update *req;
 	union netc_cbd cbd;
-	u32 len, data_size;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
-
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Set VLAN address filter table request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-	req->keye.vlan_id = cpu_to_le16(vfe->vid);
-	req->keye.tpid = vfe->tpid;
-	req->cfge.si_bitmap = cpu_to_le16(vfe->si_bitmap);
-
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_VAFT_ID,
-				NTMP_CMD_ADD, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev, "Add VLAN filter table entry failed (%d)!", err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
-}
-EXPORT_SYMBOL_GPL(ntmp_vaft_add_entry);
-
-int ntmp_vaft_query_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			  struct ntmp_vfe *entry)
-{
-	struct vaft_resp_query *resp;
-	struct vaft_req_qd *req;
-	union netc_cbd cbd;
-	u32 len, data_size;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
-
-	if (!entry || entry_id == NTMP_NULL_ENTRY_ID)
-		return -EINVAL;
-
-	data_size = sizeof(*resp);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Set VLAN address filter table request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_VAFT_ID,
-				NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev, "Query VLAN filter table entry failed (%d)!", err);
-		goto end;
-	}
-
-	resp = (struct vaft_resp_query *)req;
-	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-		dev_err(cbdr->dma_dev,
-			"Entry ID doesn't match, query ID:0x%0x, response ID:0x%x\n",
-			entry_id, le32_to_cpu(resp->entry_id));
-		err = -EIO;
-		goto end;
-	}
-
-	entry->vid = le16_to_cpu(resp->keye.vlan_id);
-	entry->tpid = resp->keye.tpid;
-	entry->si_bitmap = le16_to_cpu(resp->cfge.si_bitmap);
-
-end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
-}
-EXPORT_SYMBOL_GPL(ntmp_vaft_query_entry);
-
-int ntmp_vaft_delete_entry(struct netc_cbdr *cbdr, u32 entry_id)
-{
-	struct vaft_req_qd *req;
-	union netc_cbd cbd;
-	u32 len, data_size;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
-
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Set VLAN address filter table request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_VAFT_ID,
-				NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev,
-			"Delete VLAN filter table entry failed (%d)!", err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
-}
-EXPORT_SYMBOL_GPL(ntmp_vaft_delete_entry);
-
-int ntmp_rsst_query_or_update_entry(struct netc_cbdr *cbdr, u32 *table,
-				    int count, bool query)
-{
-	struct rsst_req_update *requ;
-	struct rsst_req_query *req;
-	union netc_cbd cbd;
-	u32 len, data_size;
-	dma_addr_t dma;
 	int err, i;
-	void *tmp;
 
-	if (count != ENETC_RSS_TABLE_ENTRY_NUM)
+	if (count != RSST_ENTRY_NUM)
 		/* HW only takes in a full 64 entry table */
 		return -EINVAL;
 
-	if (query)
-		data_size = ENETC_NTMP_ENTRY_ID_SIZE + ENETC_RSS_STSE_DATA_SIZE(count) +
-			    ENETC_RSS_CFGE_DATA_SIZE(count);
-	else
-		data_size = struct_size(requ, groups, count);
-
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
+	data.size = struct_size(req, groups, count);
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
 	/* Set the request data buffer */
-	if (query) {
-		len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-		ntmp_fill_request_headr(&cbd, dma, len, NTMP_RSST_ID,
-					NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-	} else {
-		requ = (struct rsst_req_update *)req;
-		requ->crd.update_act = cpu_to_le16(ENETC_RSS_CFGEU | ENETC_RSS_STSEU);
-		for (i = 0; i < count; i++)
-			requ->groups[i] = (u8)(table[i]);
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.rsst_ver, 0,
+			  NTMP_GEN_UA_CFGEU | NTMP_GEN_UA_STSEU, 0);
+	for (i = 0; i < count; i++)
+		req->groups[i] = (u8)(table[i]);
 
-		len = NTMP_REQ_RESP_LEN(data_size, 0);
-		ntmp_fill_request_headr(&cbd, dma, len, NTMP_RSST_ID,
-					NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
-	}
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_RSST_ID, NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
 
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev, "%s RSS table entry failed (%d)!",
-			query ? "Query" : "Update", err);
-		goto end;
-	}
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev, "Failed to update RSST entry, err: %pe\n",
+			ERR_PTR(err));
 
-	if (query) {
-		u8 *group = (u8 *)req;
-
-		group += ENETC_NTMP_ENTRY_ID_SIZE + ENETC_RSS_STSE_DATA_SIZE(count);
-		for (i = 0; i < count; i++)
-			table[i] = group[i];
-	}
-
-end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_rsst_query_or_update_entry);
+EXPORT_SYMBOL_GPL(ntmp_rsst_update_entry);
 
-/* Test codes for Time gate scheduling table */
-int ntmp_tgst_query_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			  struct ntmp_tgst_info *info)
+int ntmp_rsst_query_entry(struct ntmp_user *user, u32 *table, int count)
 {
+	struct ntmp_dma_buf data = {.dev = user->dev};
+	struct ntmp_req_by_eid *req;
+	union netc_cbd cbd;
+	int err, i;
+	u8 *group;
+
+	if (count != RSST_ENTRY_NUM)
+		/* HW only takes in a full 64 entry table */
+		return -EINVAL;
+
+	data.size = NTMP_ENTRY_ID_SIZE + RSST_STSE_DATA_SIZE(count) +
+		    RSST_CFGE_DATA_SIZE(count);
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Set the request data buffer */
+	ntmp_fill_crd_eid(req, user->tbl.rsst_ver, 0, 0, 0);
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(sizeof(*req), data.size),
+			      NTMP_RSST_ID, NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err) {
+		dev_err(user->dev, "Failed to query RSST entry, err: %pe\n",
+			ERR_PTR(err));
+		goto end;
+	}
+
+	group = (u8 *)req;
+	group += NTMP_ENTRY_ID_SIZE + RSST_STSE_DATA_SIZE(count);
+	for (i = 0; i < count; i++)
+		table[i] = group[i];
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_rsst_query_entry);
+
+int ntmp_tgst_query_entry(struct ntmp_user *user, u32 entry_id,
+			  struct tgst_query_data *tgst)
+{
+	struct ntmp_dma_buf data = {.dev = user->dev};
 	struct tgst_resp_query *resp;
 	struct tgst_cfge_data *cfge;
 	struct tgst_olse_data *olse;
-	struct tgst_req_query *req;
-	union netc_cbd cbd;
-	u32 len, data_size;
-	dma_addr_t dma;
-	u16 list_len;
+	struct ntmp_req_by_eid *req;
 	int i, err;
-	void *tmp;
 
-	if (!cbdr || !info)
-		return -EINVAL;
+	data.size = sizeof(*resp) + struct_size(cfge, ge, TGST_MAX_ENTRY_NUM) +
+		    struct_size(olse, ge, TGST_MAX_ENTRY_NUM);
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
-	data_size = sizeof(*resp) + struct_size(cfge, ge, NTMP_TGST_MAX_ENTRY_NUM) +
-		    struct_size(olse, ge, NTMP_TGST_MAX_ENTRY_NUM);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_TGST_ID,
-				NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev,
-			"Query time gate scheduling table entry failed (%d)!", err);
+	ntmp_fill_crd_eid(req, user->tbl.tgst_ver, 0, 0, entry_id);
+	err = ntmp_query_entry_by_id(user, NTMP_TGST_ID,
+				     NTMP_LEN(sizeof(*req), data.size),
+				     req, data.dma, false);
+	if (err)
 		goto end;
-	}
 
 	resp = (struct tgst_resp_query *)req;
 	cfge = (struct tgst_cfge_data *)resp->data;
-	list_len = le16_to_cpu(cfge->admin_cl_len);
 
-	info->status = le64_to_cpu(resp->status.cfg_ct);
-	info->entry_id = le32_to_cpu(resp->entry_id);
-	info->admin_bt = le64_to_cpu(cfge->admin_bt);
-	info->admin_ct = le32_to_cpu(cfge->admin_ct);
-	info->admin_ct_ext = le32_to_cpu(cfge->admin_ct_ext);
-	info->admin_cl_len = list_len;
-	for (i = 0; i < list_len; i++) {
-		info->admin[i].interval = le32_to_cpu(cfge->ge[i].interval);
-		info->admin[i].tc_gates = cfge->ge[i].tc_state;
-		info->admin[i].oper_type = le16_to_cpu(cfge->ge[i].hr_cb) &
-					   NTMP_TGST_HR_CB_GE;
-	}
+	tgst->config_change_time = resp->status.cfg_ct;
+	tgst->admin_bt = cfge->admin_bt;
+	tgst->admin_ct = cfge->admin_ct;
+	tgst->admin_ct_ext = cfge->admin_ct_ext;
+	tgst->admin_cl_len = cfge->admin_cl_len;
+	for (i = 0; i < le16_to_cpu(cfge->admin_cl_len); i++)
+		tgst->cfge_ge[i] = cfge->ge[i];
 
 	olse = (struct tgst_olse_data *)&cfge->ge[i];
-	list_len = le16_to_cpu(olse->oper_cl_len);
-
-	info->cfg_ct = le64_to_cpu(olse->cfg_ct);
-	info->cfg_ce = le64_to_cpu(olse->cfg_ce);
-	info->oper_bt = le64_to_cpu(olse->oper_bt);
-	info->oper_ct = le32_to_cpu(olse->oper_ct);
-	info->oper_ct_ext = le32_to_cpu(olse->oper_ct_ext);
-	info->oper_cl_len = list_len;
-	for (i = 0; i < list_len; i++) {
-		info->oper[i].interval = le32_to_cpu(olse->ge[i].interval);
-		info->oper[i].tc_gates = olse->ge[i].tc_state;
-		info->oper[i].oper_type = le16_to_cpu(olse->ge[i].hr_cb) &
-					  NTMP_TGST_HR_CB_GE;
-	}
+	tgst->oper_cfg_ct = olse->oper_cfg_ct;
+	tgst->oper_cfg_ce = olse->oper_cfg_ce;
+	tgst->oper_bt = olse->oper_bt;
+	tgst->oper_ct = olse->oper_ct;
+	tgst->oper_ct_ext = olse->oper_ct_ext;
+	tgst->oper_cl_len = olse->oper_cl_len;
+	for (i = 0; i < le16_to_cpu(olse->oper_cl_len); i++)
+		tgst->olse_ge[i] = olse->ge[i];
 
 end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_tgst_query_entry);
 
-int ntmp_tgst_delete_admin_gate_list(struct netc_cbdr *cbdr, u32 entry_id)
+int ntmp_tgst_delete_admin_gate_list(struct ntmp_user *user, u32 entry_id)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct tgst_req_update),
+	};
 	struct tgst_req_update *req;
 	struct tgst_cfge_data *cfge;
 	union netc_cbd cbd;
-	u32 len, data_size;
-	dma_addr_t dma;
-	void *tmp;
+	u32 len;
 	int err;
 
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	cfge = &req->cfge;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
 	/* Set the request data buffer and set the admin control list len
 	 * to zero to delete the existing admin control list.
 	 */
-	req->crd.update_act = cpu_to_le16(1);
-	req->crd.tbl_ver = 0;
-	req->entry_id = cpu_to_le32(entry_id);
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.tgst_ver, 0,
+			  NTMP_GEN_UA_CFGEU, entry_id);
+	cfge = &req->cfge;
 	cfge->admin_cl_len = 0;
 
 	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, sizeof(struct tgst_resp_status));
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_TGST_ID,
-				NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
+	len = NTMP_LEN(data.size, sizeof(struct tgst_resp_status));
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_TGST_ID,
+			      NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
 
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
 	if (err)
-		dev_err(cbdr->dma_dev,
-			"Delete time gate scheduling table entry failed (%d)!", err);
+		dev_err(user->dev, "Failed to delete TGST entry 0x%x, err: %pe\n",
+			entry_id, ERR_PTR(err));
 
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_tgst_delete_admin_gate_list);
 
-static u64 ntmp_adjust_base_time(struct netc_cbdr *cbdr, u64 base_time, u32 cycle_time)
+int ntmp_tgst_update_admin_gate_list(struct ntmp_user *user, u32 entry_id,
+				     struct tgst_cfge_data *cfge)
 {
-	u64 current_time, delta, n;
-	u32 time_high, time_low;
-
-	time_low = netc_cbdr_read(cbdr->regs.sictr0);
-	time_high = netc_cbdr_read(cbdr->regs.sictr1);
-	current_time = (u64)time_high << 32 | time_low;
-	if (base_time >= current_time)
-		return base_time;
-
-	delta = current_time - base_time;
-	n = DIV_ROUND_UP_ULL(delta, cycle_time);
-
-	return base_time + (n * (u64)cycle_time);
-}
-
-int ntmp_tgst_update_admin_gate_list(struct netc_cbdr *cbdr, u32 entry_id,
-				     struct ntmp_tgst_cfg *cfg)
-{
+	u16 list_len = le16_to_cpu(cfge->admin_cl_len);
+	u32 cfge_len = struct_size(cfge, ge, list_len);
+	struct ntmp_dma_buf data = {.dev = user->dev};
 	struct tgst_req_update *req;
-	struct tgst_cfge_data *cfge;
 	union netc_cbd cbd;
-	struct tgst_ge *ge;
-	u32 len, data_size;
-	dma_addr_t dma;
-	u64 base_time;
-	int i, err;
-	void *tmp;
+	u32 len;
+	int err;
 
 	/* Calculate the size of request data buffer */
-	data_size = struct_size(req, cfge.ge, cfg->num_entries);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	cfge = &req->cfge;
-	ge = cfge->ge;
+	data.size = struct_size(req, cfge.ge, list_len);
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
 	/* Set the request data buffer */
-	req->crd.update_act = cpu_to_le16(1);
-	req->crd.tbl_ver = 0;
-	req->entry_id = cpu_to_le32(entry_id);
-	base_time = ntmp_adjust_base_time(cbdr, cfg->base_time, cfg->cycle_time);
-	cfge->admin_bt = cpu_to_le64(base_time);
-	cfge->admin_ct = cpu_to_le32(cfg->cycle_time);
-	cfge->admin_ct_ext = cpu_to_le32(cfg->cycle_time_extension);
-	cfge->admin_cl_len = cpu_to_le16(cfg->num_entries);
-
-	for (i = 0; i < cfg->num_entries; i++) {
-		struct ntmp_tgst_ge *temp_entry = &cfg->entries[i];
-		struct tgst_ge *temp_ge = ge + i;
-
-		temp_ge->tc_state = (u8)temp_entry->tc_gates;
-		temp_ge->interval = cpu_to_le32(temp_entry->interval);
-		temp_ge->hr_cb = cpu_to_le16(temp_entry->oper_type);
-	}
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.tgst_ver, 0,
+			  NTMP_GEN_UA_CFGEU, entry_id);
+	memcpy(&req->cfge, cfge, cfge_len);
 
 	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, sizeof(struct tgst_resp_status));
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_TGST_ID,
-				NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
+	len = NTMP_LEN(data.size, sizeof(struct tgst_resp_status));
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_TGST_ID,
+			      NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
 
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
 	if (err)
-		dev_err(cbdr->dma_dev,
-			"Update time gate scheduling table entry failed (%d)!", err);
+		dev_err(user->dev, "Failed to update TGST entry 0x%x, err: %pe\n",
+			entry_id, ERR_PTR(err));
 
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_tgst_update_admin_gate_list);
 
-int ntmp_rpt_add_or_update_entry(struct netc_cbdr *cbdr, struct ntmp_rpt_cfg *cfg)
+int ntmp_rpt_add_entry(struct ntmp_user *user, struct ntmp_rpt_entry *entry)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct rpt_req_ua),
+	};
 	struct rpt_req_ua *req;
 	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
 	int err;
 
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
-	req->crd.update_act = cpu_to_le16(0xf);
-	req->entry_id = cpu_to_le32(cfg->entry_id);
-	req->cfge.cbs = cpu_to_le32(cfg->cbs);
-	req->cfge.cir = cpu_to_le32(cfg->cir);
-	req->cfge.ebs = cpu_to_le32(cfg->ebs);
-	req->cfge.eir = cpu_to_le32(cfg->eir);
-	req->fee.fen = 1;	//always enable the function
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.rpt_ver, 0, NTMP_GEN_UA_CFGEU |
+			  RPT_UA_FEEU | RPT_UA_PSEU | RPT_UA_STSEU,
+			  entry->entry_id);
+	req->cfge = entry->cfge;
+	req->fee = entry->fee;
 
 	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_RPT_ID,
-				NTMP_CMD_AU, NTMP_AM_ENTRY_ID);
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_RPT_ID, NTMP_CMD_ADD, NTMP_AM_ENTRY_ID);
 
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
 	if (err)
-		dev_err(cbdr->dma_dev,
-			"Add/Update rate policer table entry failed (%d)!", err);
+		dev_err(user->dev, "Failed to add RPT entry 0x%x, err: %pe\n",
+			entry->entry_id, ERR_PTR(err));
 
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_rpt_add_or_update_entry);
+EXPORT_SYMBOL_GPL(ntmp_rpt_add_entry);
 
-int ntmp_rpt_query_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			 struct ntmp_rpt_info *info)
+int ntmp_rpt_query_entry(struct ntmp_user *user, u32 entry_id,
+			 struct ntmp_rpt_entry *entry)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct rpt_resp_query),
+	};
+	struct ntmp_req_by_eid *req;
 	struct rpt_resp_query *resp;
-	struct rpt_req_nua *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
+	u32 len;
 	int err;
 
-	if (!info || entry_id == NTMP_NULL_ENTRY_ID)
-		return -EINVAL;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
-	data_size = sizeof(*resp);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Request data */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_RPT_ID,
-				NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev,
-			"Query rate policer table entry failed (%d)!", err);
+	ntmp_fill_crd_eid(req, user->tbl.rpt_ver, 0, 0, entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_RPT_ID, len,
+				     req, data.dma, true);
+	if (err)
 		goto end;
-	}
 
 	resp = (struct rpt_resp_query *)req;
-	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-		dev_err(cbdr->dma_dev,
-			"Entry ID doesn't match, query ID:0x%0x, response ID:0x%x\n",
-			entry_id, le32_to_cpu(resp->entry_id));
-		err = -EIO;
-		goto end;
-	}
-
-	info->sts.byte_cnt = le64_to_cpu(resp->stse.byte_count);
-	info->sts.drop_frames = le32_to_cpu(resp->stse.drop_frames);
-	info->sts.dr0_grn_frames = le32_to_cpu(resp->stse.dr0_grn_frames);
-	info->sts.dr1_grn_frames = le32_to_cpu(resp->stse.dr1_grn_frames);
-	info->sts.dr2_ylw_frames = le32_to_cpu(resp->stse.dr2_ylw_frames);
-	info->sts.dr3_red_frames = le32_to_cpu(resp->stse.dr3_red_frames);
-	info->sts.remark_ylw_frames = le32_to_cpu(resp->stse.remark_ylw_frames);
-	info->sts.remark_red_frames = le32_to_cpu(resp->stse.remark_red_frames);
-	info->cfg.cir = le32_to_cpu(resp->cfge.cir);
-	info->cfg.cbs = le32_to_cpu(resp->cfge.cbs);
-	info->cfg.eir = le32_to_cpu(resp->cfge.eir);
-	info->cfg.ebs = le32_to_cpu(resp->cfge.ebs);
-	info->cfg.mren = resp->cfge.mren;
-	info->cfg.doy = resp->cfge.doy;
-	info->cfg.cm = resp->cfge.cm;
-	info->cfg.cf = resp->cfge.cf;
-	info->cfg.ndor = resp->cfge.ndor;
-	info->cfg.sdu_type = resp->cfge.sdu_type;
-	info->fen = !!resp->fee.fen;
-	info->mr = resp->pse.mr;
+	entry->stse = resp->stse;
+	entry->cfge = resp->cfge;
+	entry->fee = resp->fee;
+	entry->pse = resp->pse;
 
 end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_rpt_query_entry);
 
-int ntmp_rpt_delete_entry(struct netc_cbdr *cbdr, u32 entry_id)
+int ntmp_rpt_delete_entry(struct ntmp_user *user, u32 entry_id)
 {
-	struct rpt_req_nua *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
-
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_RPT_ID,
-				NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev,
-			"Delete rate policer table entry failed (%d)!", err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
+	return ntmp_delete_entry_by_id(user, NTMP_RPT_ID, user->tbl.rpt_ver,
+				       entry_id, NTMP_EID_REQ_LEN, 0);
 }
 EXPORT_SYMBOL_GPL(ntmp_rpt_delete_entry);
 
-int ntmp_isit_add_or_update_entry(struct netc_cbdr *cbdr, struct ntmp_isit_cfg *cfg,
-				  bool add)
+int ntmp_isit_add_entry(struct ntmp_user *user, struct ntmp_isit_entry *entry)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct isit_resp_query),
+	};
 	struct isit_resp_query *resp;
 	struct isit_req_ua *req;
 	union netc_cbd cbd;
-	u32 data_size, len;
-	u16 v_pbit_vid = 0;
-	dma_addr_t dma;
-	void *tmp;
+	u32 len;
 	int err;
 
-	data_size = add ? sizeof(*resp) : sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
-	if (!add)
-		req->crd.update_act = cpu_to_le16(1);
-	else
-		/* Query ENTRY_ID only */
-		req->crd.query_act = 1;
-	req->ak.key_type = cpu_to_le32(cfg->key_type);
-	ether_addr_copy(req->ak.fk.mac, cfg->mac);
+	ntmp_fill_crd(&req->crd, user->tbl.isit_ver, NTMP_QA_ENTRY_ID,
+		      NTMP_GEN_UA_CFGEU);
+	req->ak.keye = entry->keye;
+	req->is_eid = entry->is_eid;
 
-	if (cfg->tagged)
-		v_pbit_vid = cfg->vid | BIT(15);
+	len = NTMP_LEN(sizeof(*req), sizeof(*resp));
+	/* Add command, followed by a query. So that we can get
+	 * the entry id from HW.
+	 */
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_ISIT_ID,
+			      NTMP_CMD_AQ, NTMP_AM_EXACT_KEY);
 
-	req->ak.fk.vlan_h = (v_pbit_vid >> 8) & 0xff;
-	req->ak.fk.vlan_l = v_pbit_vid & 0xff;
-	req->is_eid = cpu_to_le32(cfg->is_eid);
-
-	/* Request header */
-	if (add) {
-		len = NTMP_REQ_RESP_LEN(sizeof(*req), sizeof(*resp));
-		/* Must be EXACT MATCH and the command must be
-		 * add, followed by a query. So that we can get
-		 * the entry id from HW.
-		 */
-		ntmp_fill_request_headr(&cbd, dma, len, NTMP_ISIT_ID,
-					NTMP_CMD_AQ, NTMP_AM_EXACT_KEY);
-	} else {
-		len = NTMP_REQ_RESP_LEN(sizeof(*req), sizeof(struct isit_resp_nq));
-		ntmp_fill_request_headr(&cbd, dma, len, NTMP_ISIT_ID,
-					NTMP_CMD_UPDATE, NTMP_AM_EXACT_KEY);
-	}
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
 	if (err) {
-		dev_err(cbdr->dma_dev,
-			"%s ingress stream identification table entry failed (%d)!",
-			add ? "Add" : "Update", err);
-		goto end;
-	}
+		dev_err(user->dev, "Failed to add ISIT entry, err: %pe\n",
+			ERR_PTR(err));
 
-	if (add) {
-		resp = (struct isit_resp_query *)req;
-		cfg->entry_id = le32_to_cpu(resp->entry_id);
-	}
-
-end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
-}
-EXPORT_SYMBOL_GPL(ntmp_isit_add_or_update_entry);
-
-int ntmp_isit_query_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			  struct ntmp_isit_info *info)
-{
-	struct isit_resp_query *resp;
-	struct isit_req_nua *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
-
-	if (!info || entry_id == NTMP_NULL_ENTRY_ID)
-		return -EINVAL;
-
-	data_size = sizeof(*resp);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	req->ak.entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_ISIT_ID,
-				NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev,
-			"Query ingress stream identification table entry failed (%d)!",
-			err);
 		goto end;
 	}
 
 	resp = (struct isit_resp_query *)req;
+	entry->entry_id = le32_to_cpu(resp->entry_id);
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+
+int ntmp_isit_query_entry(struct ntmp_user *user, u32 entry_id,
+			  struct ntmp_isit_entry *entry)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct isit_resp_query),
+	};
+	struct isit_resp_query *resp;
+	struct isit_req_qd *req;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd(&req->crd, user->tbl.isit_ver, 0, 0);
+	req->ak.eid.entry_id = cpu_to_le32(entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_ISIT_ID, len,
+				     (struct ntmp_req_by_eid *)req,
+				     data.dma, false);
+	if (err)
+		goto end;
+
+	resp = (struct isit_resp_query *)req;
 	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-		dev_err(cbdr->dma_dev,
-			"Entry ID doesn't match, query ID:0x%0x, response ID:0x%x\n",
+		dev_err(user->dev,
+			"ISIT: query EID (0x%0x) doesn't match response EID (0x%x)\n",
 			entry_id, le32_to_cpu(resp->entry_id));
 		err = -EIO;
+
 		goto end;
 	}
 
-	info->key_type = le32_to_cpu(resp->key.key_type) & NTMP_ISIT_KEY_TYPE;
-	memcpy(info->key, resp->key.frame_key, NTMP_ISIT_FRAME_KEY_LEN);
-	info->is_eid = le32_to_cpu(resp->is_eid);
+	entry->keye = resp->keye;
+	entry->is_eid = resp->is_eid;
 
 end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_isit_query_entry);
 
-int ntmp_isit_delete_entry(struct netc_cbdr *cbdr, u32 entry_id)
+int ntmp_isit_delete_entry(struct ntmp_user *user, u32 entry_id)
 {
-	struct isit_req_nua *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
+	u32 req_len = sizeof(struct isit_req_qd);
 
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	req->ak.entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, sizeof(struct isit_resp_nq));
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_ISIT_ID,
-				NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev,
-			"Delete ingress stream identification table entry failed (%d)!",
-			err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
+	return ntmp_delete_entry_by_id(user, NTMP_ISIT_ID, user->tbl.isit_ver,
+				       entry_id, req_len, NTMP_STATUS_RESP_LEN);
 }
-EXPORT_SYMBOL_GPL(ntmp_isit_delete_entry);
 
-int ntmp_ist_add_or_update_entry(struct netc_cbdr *cbdr, struct ntmp_ist_cfg *cfg)
+int ntmp_ist_add_entry(struct ntmp_user *user, struct ntmp_ist_entry *entry)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct ist_req_ua),
+	};
 	struct ist_req_ua *req;
 	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
 	int err;
 
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
 	/* Fill up NTMP request data buffer */
-	req->crd.update_act = cpu_to_le16(1);
-	req->entry_id = cpu_to_le32(cfg->entry_id);
-	req->cfge.sfe = cfg->sfe;
-	req->cfge.fa = cfg->fa;
-	req->cfge.msdu = cpu_to_le16(cfg->msdu);
-	req->cfge.rp_eid = cpu_to_le32(cfg->rp_eid);
-	req->cfge.sgi_eid = cpu_to_le32(cfg->sgi_eid);
-	req->cfge.isc_eid = cpu_to_le32(cfg->isc_eid);
-	req->cfge.si_bitmap = cpu_to_le16(cfg->si_bitmap);
-	req->cfge.orp = cfg->orp;
-	req->cfge.osgi = cfg->osgi;
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.ist_ver, 0,
+			  NTMP_GEN_UA_CFGEU, entry->entry_id);
+	req->cfge = entry->cfge;
 
 	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_IST_ID,
-				NTMP_CMD_AU, NTMP_AM_ENTRY_ID);
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_IST_ID, NTMP_CMD_ADD, NTMP_AM_ENTRY_ID);
 
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
 	if (err)
-		dev_err(cbdr->dma_dev,
-			"Add/Update ingress stream table entry failed (%d)!", err);
+		dev_err(user->dev, "Failed to add IST entry 0x%x, err: %pe\n",
+			entry->entry_id, ERR_PTR(err));
 
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_ist_add_or_update_entry);
+EXPORT_SYMBOL_GPL(ntmp_ist_add_entry);
 
-int ntmp_ist_query_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			 struct ntmp_ist_info *info)
+int ntmp_ist_query_entry(struct ntmp_user *user, u32 entry_id,
+			 struct ist_cfge_data *cfge)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct ist_resp_query),
+	};
 	struct ist_resp_query *resp;
-	struct ist_req_nua *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
+	struct ntmp_req_by_eid *req;
+	u32 len;
 	int err;
 
-	if (!info || entry_id == NTMP_NULL_ENTRY_ID)
-		return -EINVAL;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Fill up NTMP request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, sizeof(*resp));
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_IST_ID,
-				NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev,
-			"Query ingress stream table entry failed (%d)!", err);
+	ntmp_fill_crd_eid(req, user->tbl.ist_ver, 0, 0, entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_IST_ID, len,
+				     req, data.dma, true);
+	if (err)
 		goto end;
-	}
 
 	resp = (struct ist_resp_query *)req;
-	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-		dev_err(cbdr->dma_dev,
-			"Entry ID doesn't match, query ID:0x%0x, response ID:0x%x\n",
-			entry_id, le32_to_cpu(resp->entry_id));
-		err = -EIO;
-		goto end;
-	}
-
-	info->sfe = resp->cfge.sfe;
-	info->ipv = resp->cfge.ipv;
-	info->oipv = resp->cfge.oipv;
-	info->dr = resp->cfge.dr;
-	info->odr = resp->cfge.odr;
-	info->orp = resp->cfge.orp;
-	info->osgi = resp->cfge.osgi;
-	info->fa = resp->cfge.fa;
-	info->sdu_type = resp->cfge.sdu_type;
-	info->msdu = le16_to_cpu(resp->cfge.msdu);
-	info->si_bitmap = le16_to_cpu(resp->cfge.si_bitmap);
-	info->rp_eid = le32_to_cpu(resp->cfge.rp_eid);
-	info->sgi_eid = le32_to_cpu(resp->cfge.sgi_eid);
-	info->isc_eid = le32_to_cpu(resp->cfge.isc_eid);
+	*cfge = resp->cfge;
 
 end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_ist_query_entry);
 
-int ntmp_ist_delete_entry(struct netc_cbdr *cbdr, u32 entry_id)
+int ntmp_ist_delete_entry(struct ntmp_user *user, u32 entry_id)
 {
-	struct ist_req_nua *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
-
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Fill up NTMP request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_IST_ID,
-				NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev,
-			"Delete ingress stream table entry failed (%d)!", err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
+	return ntmp_delete_entry_by_id(user, NTMP_IST_ID, user->tbl.ist_ver,
+				       entry_id, NTMP_EID_REQ_LEN, 0);
 }
 EXPORT_SYMBOL_GPL(ntmp_ist_delete_entry);
 
-int ntmp_isft_add_or_update_entry(struct netc_cbdr *cbdr, struct ntmp_isft_cfg *cfg,
-				  bool add)
+int ntmp_isft_add_entry(struct ntmp_user *user, struct ntmp_isft_entry *entry)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct isft_resp_query),
+	};
 	struct isft_resp_query *resp;
 	struct isft_req_ua *req;
 	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
+	u32 len;
 	int err;
 
-	data_size = add ? sizeof(*resp) : sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
-	req->crd.update_act = cpu_to_le16(1);
-	if (add)
-		req->crd.query_act = 1;
-	req->ak.is_eid = cpu_to_le32(cfg->is_eid);
-	req->ak.pcp = cfg->priority;
+	ntmp_fill_crd(&req->crd, user->tbl.isft_ver, NTMP_QA_ENTRY_ID,
+		      NTMP_GEN_UA_CFGEU);
+	req->ak.keye = entry->keye;
+	req->cfge = entry->cfge;
 
-	/* Override flags need to be set */
-	if (cfg->or_flags & NTMP_ISFT_FLAG_ORP) {
-		req->cfge.orp = 1;
-		req->cfge.rp_eid = cpu_to_le32(cfg->rp_eid);
-	}
+	len = NTMP_LEN(sizeof(*req), sizeof(*resp));
+	/* Add command, followed by a query. So that we can get entry
+	 * ID from hardware.
+	 */
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_ISFT_ID,
+			      NTMP_CMD_AQ, NTMP_AM_EXACT_KEY);
 
-	if (cfg->or_flags & NTMP_ISFT_FLAG_OSGI) {
-		req->cfge.osgi = 1;
-		req->cfge.sgi_eid = cpu_to_le32(cfg->sgi_eid);
-	}
-
-	req->cfge.isc_eid = cpu_to_le32(cfg->isc_eid);
-	req->cfge.msdu = cpu_to_le16(cfg->msdu);
-
-	/* Request header */
-	if (add) {
-		len = NTMP_REQ_RESP_LEN(sizeof(*req), sizeof(*resp));
-		/* Must be exact match, and command must be add,
-		 * followed by a query. So that we can get entry
-		 * ID from hardware.
-		 */
-		ntmp_fill_request_headr(&cbd, dma, len, NTMP_ISFT_ID,
-					NTMP_CMD_AQ, NTMP_AM_EXACT_KEY);
-	} else {
-		len = NTMP_REQ_RESP_LEN(sizeof(*req), sizeof(struct isft_resp_nq));
-		ntmp_fill_request_headr(&cbd, dma, len, NTMP_ISFT_ID,
-					NTMP_CMD_UPDATE, NTMP_AM_EXACT_KEY);
-	}
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
 	if (err) {
-		dev_err(cbdr->dma_dev,
-			"%s ingress stream filter table entry failed (%d)!",
-			add ? "Add" : "Update", err);
-		goto end;
-	}
+		dev_err(user->dev, "Failed to add ISFT entry, err: %pe\n",
+			ERR_PTR(err));
 
-	if (add) {
-		resp = (struct isft_resp_query *)req;
-		cfg->entry_id = le32_to_cpu(resp->entry_id);
-	}
-
-end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
-}
-EXPORT_SYMBOL_GPL(ntmp_isft_add_or_update_entry);
-
-int ntmp_isft_query_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			  struct ntmp_isft_info *info)
-{
-	struct isft_resp_query *resp;
-	struct isft_req_nua *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
-
-	if (!info || entry_id == NTMP_NULL_ENTRY_ID)
-		return -EINVAL;
-
-	data_size = sizeof(*resp);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	req->ak.entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_ISFT_ID,
-				NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev,
-			"Query ingress stream filter table entry failed (%d)!", err);
 		goto end;
 	}
 
 	resp = (struct isft_resp_query *)req;
+	entry->entry_id = le32_to_cpu(resp->entry_id);
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+
+int ntmp_isft_query_entry(struct ntmp_user *user, u32 entry_id,
+			  struct ntmp_isft_entry *entry)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct maft_req_add),
+	};
+	struct isft_resp_query *resp;
+	struct isft_req_qd *req;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd(&req->crd, user->tbl.isft_ver, 0, 0);
+	req->ak.eid.entry_id = cpu_to_le32(entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_ISFT_ID, len,
+				     (struct ntmp_req_by_eid *)req,
+				     data.dma, false);
+	if (err)
+		goto end;
+
+	resp = (struct isft_resp_query *)req;
 	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-		dev_err(cbdr->dma_dev,
-			"Entry ID doesn't match, query ID:0x%0x, response ID:0x%x\n",
+		dev_err(user->dev,
+			"ISFT: query EID (0x%0x) doesn't match response EID (0x%x)\n",
 			entry_id, le32_to_cpu(resp->entry_id));
+
 		err = -EIO;
 		goto end;
 	}
 
-	info->is_eid = le32_to_cpu(resp->keye.is_eid);
-	info->pcp = resp->keye.pcp;
-	info->ipv = resp->cfge.ipv;
-	info->oipv = resp->cfge.oipv;
-	info->dr = resp->cfge.dr;
-	info->odr = resp->cfge.odr;
-	info->osgi = resp->cfge.osgi;
-	info->orp = resp->cfge.orp;
-	info->sdu_type = resp->cfge.sdu_type;
-	info->msdu = le16_to_cpu(resp->cfge.msdu);
-	info->rp_eid = le32_to_cpu(resp->cfge.rp_eid);
-	info->sgi_eid = le32_to_cpu(resp->cfge.sgi_eid);
-	info->isc_eid = le32_to_cpu(resp->cfge.isc_eid);
+	entry->keye = resp->keye;
+	entry->cfge = resp->cfge;
 
 end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_isft_query_entry);
 
-int ntmp_isft_delete_entry(struct netc_cbdr *cbdr, u32 entry_id)
+int ntmp_isft_delete_entry(struct ntmp_user *user, u32 entry_id)
 {
-	struct isft_req_nua *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
+	u32 req_len = sizeof(struct isft_req_qd);
 
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Fill up NTMP request data buffer */
-	req->ak.entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, sizeof(struct isft_resp_nq));
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_ISFT_ID,
-				NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev,
-			"Delete ingress stream filter table entry failed (%d)!", err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
+	return ntmp_delete_entry_by_id(user, NTMP_ISFT_ID, user->tbl.isft_ver,
+				       entry_id, req_len, NTMP_STATUS_RESP_LEN);
 }
-EXPORT_SYMBOL_GPL(ntmp_isft_delete_entry);
 
-int ntmp_sgclt_add_entry(struct netc_cbdr *cbdr, struct ntmp_sgclt_cfg *cfg)
+int ntmp_sgit_add_or_update_entry(struct ntmp_user *user, bool add,
+				  struct ntmp_sgit_entry *entry)
 {
-	struct sgclt_req_add *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	int i, err;
-	void *tmp;
-
-	data_size = struct_size(req, cfge.ge, cfg->num_gates);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Fill up NTMP request data buffer */
-	req->entry_id = cpu_to_le32(cfg->entry_id);
-	req->cfge.ct = cpu_to_le32(cfg->ct);
-	req->cfge.ext_gtst = 1;
-	if (cfg->init_ipv >= 0) {
-		req->cfge.ext_oipv = 1;
-		req->cfge.ext_ipv = cfg->init_ipv & 0x7;
-	}
-
-	req->cfge.list_len = cfg->num_gates - 1;
-	for (i = 0; i < cfg->num_gates; i++) {
-		struct action_gate_entry *from = &cfg->entries[i];
-		struct sgclt_ge *to = &req->cfge.ge[i];
-
-		if (from->gate_state)
-			to->gtst = ENETC_STREAM_GATE_STATE_OPEN;
-
-		if (from->ipv >= 0) {
-			to->oipv = 1;
-			to->ipv = from->ipv & 0x7;
-		}
-
-		if (from->maxoctets >= 0) {
-			to->iomen |= 0x01;
-			to->iom[0] = from->maxoctets & 0xFF;
-			to->iom[1] = (from->maxoctets >> 8) & 0xFF;
-			to->iom[2] = (from->maxoctets >> 16) & 0xFF;
-		}
-
-		to->interval = from->interval;
-	}
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_SGCLT_ID,
-				NTMP_CMD_ADD, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev,
-			"Add stream gate control list entry failed (%d)!", err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
-}
-EXPORT_SYMBOL_GPL(ntmp_sgclt_add_entry);
-
-int ntmp_sgclt_query_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			   struct ntmp_sgclt_info *info)
-{
-	struct sgclt_resp_query *resp;
-	struct sgclt_req_qd *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	int i, err;
-	void *tmp;
-
-	if (!info || entry_id == NTMP_NULL_ENTRY_ID)
-		return -EINVAL;
-
-	data_size = struct_size(resp, cfge.ge, NTMP_SGCLT_MAX_GE_NUM);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Fill up NTMP request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_SGCLT_ID,
-				NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev,
-			"Query stream gate control list entry failed (%d)!", err);
-		goto end;
-	}
-
-	resp = (struct sgclt_resp_query *)req;
-	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-		dev_err(cbdr->dma_dev,
-			"Entry ID doesn't match, query ID:0x%0x, response ID:0x%x\n",
-			entry_id, le32_to_cpu(resp->entry_id));
-		err = -EIO;
-		goto end;
-	}
-
-	info->cycle_time = le32_to_cpu(resp->cfge.ct);
-	info->ref_count = resp->ref_count;
-	info->list_len = resp->cfge.list_len + 1;
-	info->ext_gtst = resp->cfge.ext_gtst;
-	info->ext_ipv = resp->cfge.ext_ipv;
-	info->ext_oipv = resp->cfge.ext_oipv;
-	for (i = 0; i < info->list_len; i++) {
-		info->ge[i].interval = le32_to_cpu(resp->cfge.ge[i].interval);
-		info->ge[i].iom = resp->cfge.ge[i].iom[2] << 16 | resp->cfge.ge[i].iom[1] << 8 |
-				  resp->cfge.ge[i].iom[0];
-		info->ge[i].ipv = resp->cfge.ge[i].ipv;
-		info->ge[i].oipv = resp->cfge.ge[i].oipv;
-		info->ge[i].iomen = resp->cfge.ge[i].iomen;
-		info->ge[i].gtst = resp->cfge.ge[i].gtst;
-	}
-
-end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
-}
-EXPORT_SYMBOL_GPL(ntmp_sgclt_query_entry);
-
-int ntmp_sgclt_delete_entry(struct netc_cbdr *cbdr, u32 entry_id)
-{
-	struct sgclt_req_qd *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
-
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Fill up NTMP request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_SGCLT_ID,
-				NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev,
-			"Delete stream gate control list entry failed (%d)!", err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
-}
-EXPORT_SYMBOL_GPL(ntmp_sgclt_delete_entry);
-
-int ntmp_sgit_add_or_update_entry(struct netc_cbdr *cbdr, struct ntmp_sgit_cfg *cfg)
-{
+	int cmd = add ? NTMP_CMD_ADD : NTMP_CMD_UPDATE;
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct sgit_req_ua),
+	};
 	struct sgit_req_ua *req;
 	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	u64 base_time;
-	void *tmp;
 	int err;
 
-	base_time = cfg->admin_bt;
-	if (cfg->admin_sgcl_eid != NTMP_NULL_ENTRY_ID)
-		base_time = ntmp_adjust_base_time(cbdr, cfg->admin_bt, cfg->sgcl_ct);
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	req->crd.update_act = cpu_to_le16(7);
-	req->entry_id = cpu_to_le32(cfg->entry_id);
-	req->acfge.admin_sgcl_eid = cpu_to_le32(cfg->admin_sgcl_eid);
-	req->acfge.admin_bt = cpu_to_le64(base_time);
-	req->acfge.admin_ct_ext = cpu_to_le32(cfg->admin_ct_ext);
-	/* Specify the gate state to be open before the admin stream
-	 * control list takes effect.
-	 */
-	req->icfge.gst = 1;
-	if (cfg->init_ipv >= 0) {
-		req->icfge.oipv = 1;
-		req->icfge.ipv = cfg->init_ipv & 0x7;
-	}
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.sgit_ver, 0, SGIT_UA_ACFGEU |
+			  SGIT_UA_CFGEU | SGIT_UA_SGISEU, entry->entry_id);
+	req->acfge = entry->acfge;
+	req->cfge = entry->cfge;
+	req->icfge = entry->icfge;
 
 	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_SGIT_ID,
-				NTMP_CMD_AU, NTMP_AM_ENTRY_ID);
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_SGIT_ID, cmd, NTMP_AM_ENTRY_ID);
 
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
 	if (err)
-		dev_err(cbdr->dma_dev,
-			"Add/Update stream gate instance table entry failed (%d)!", err);
+		dev_err(user->dev, "Failed to %s SGIT entry 0x%x, err: %pe\n",
+			add ? "add" : "update", entry->entry_id, ERR_PTR(err));
 
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
 EXPORT_SYMBOL_GPL(ntmp_sgit_add_or_update_entry);
 
-int ntmp_sgit_query_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			  struct ntmp_sgit_info *info)
+int ntmp_sgit_query_entry(struct ntmp_user *user, u32 entry_id,
+			  struct ntmp_sgit_entry *entry)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct sgit_resp_query),
+	};
 	struct sgit_resp_query *resp;
-	struct sgit_req_nua *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
+	struct ntmp_req_by_eid *req;
+	u32 len;
 	int err;
 
-	if (!info || entry_id == NTMP_NULL_ENTRY_ID)
-		return -EINVAL;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
-	data_size = sizeof(*resp);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_SGIT_ID,
-				NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev,
-			"Query stream gate instance table entry failed (%d)!", err);
+	ntmp_fill_crd_eid(req, user->tbl.sgit_ver, 0, 0, entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_SGIT_ID, len,
+				     req, data.dma, true);
+	if (err)
 		goto end;
-	}
 
 	resp = (struct sgit_resp_query *)req;
-	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-		dev_err(cbdr->dma_dev,
-			"Entry ID doesn't match, query ID:0x%0x, response ID:0x%x\n",
-			entry_id, le32_to_cpu(resp->entry_id));
-		err = -EIO;
+	entry->sgise = resp->sgise;
+	entry->cfge = resp->cfge;
+	entry->icfge = resp->icfge;
+	entry->acfge = resp->acfge;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+
+int ntmp_sgit_delete_entry(struct ntmp_user *user, u32 entry_id)
+{
+	return ntmp_delete_entry_by_id(user, NTMP_SGIT_ID, user->tbl.sgit_ver,
+				       entry_id, NTMP_EID_REQ_LEN, 0);
+}
+
+int ntmp_sgclt_add_entry(struct ntmp_user *user, struct ntmp_sgclt_entry *entry)
+{
+	struct ntmp_dma_buf data = {.dev = user->dev};
+	struct sgclt_req_add *req;
+	u32 num_gates, cfge_len;
+	union netc_cbd cbd;
+	int err;
+
+	num_gates = entry->cfge.list_length + 1;
+	data.size = struct_size(req, cfge.ge, num_gates);
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Fill up NTMP request data buffer */
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.sgclt_ver, 0, 0,
+			  entry->entry_id);
+	cfge_len = struct_size_t(struct sgclt_cfge_data, ge, num_gates);
+	memcpy(&req->cfge, &entry->cfge, cfge_len);
+
+	/* Request header */
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_SGCLT_ID, NTMP_CMD_ADD, NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev, "Failed to add SGCLT entry 0x%x, err: %pe\n",
+			entry->entry_id, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+
+int ntmp_sgclt_query_entry(struct ntmp_user *user, u32 entry_id,
+			   struct ntmp_sgclt_entry *entry, u32 cfge_size)
+{
+	struct ntmp_dma_buf data = {.dev = user->dev};
+	struct sgclt_resp_query *resp;
+	u32 num_gates, cfge_len, len;
+	struct ntmp_req_by_eid *req;
+	int err;
+
+	data.size = struct_size(resp, cfge.ge, SGCLT_MAX_GE_NUM);
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(req, user->tbl.sgclt_ver, 0, 0, entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_SGCLT_ID, len,
+				     req, data.dma, true);
+	if (err)
+		goto end;
+
+	resp = (struct sgclt_resp_query *)req;
+	entry->ref_count = resp->ref_count;
+	num_gates = resp->cfge.list_length + 1;
+	cfge_len = struct_size_t(struct sgclt_cfge_data, ge, num_gates);
+	if (cfge_len > cfge_size) {
+		dev_err(user->dev,
+			"Responsed SGCLT_CFGE size (%u) is larger than %u\n",
+			cfge_size, cfge_len);
+		err = -ENOMEM;
+
 		goto end;
 	}
 
-	info->cfg_ct = le64_to_cpu(resp->sgise.cfg_ct);
-	info->oper_bt = le64_to_cpu(resp->sgise.oper_bt);
-	info->admin_bt = le64_to_cpu(resp->acfge.admin_bt);
-	info->oper_ct_ext = le32_to_cpu(resp->sgise.oper_ct_ext);
-	info->admin_ct_ext = le32_to_cpu(resp->acfge.admin_ct_ext);
-	info->oper_sgcl_eid = le32_to_cpu(resp->sgise.oper_sgcl_eid);
-	info->admin_sgcl_eid = le32_to_cpu(resp->acfge.admin_sgcl_eid);
-	info->sdu_type = resp->cfge.sdu_type;
-	info->state = resp->sgise.state;
-	info->oex = resp->sgise.oex;
-	info->oexen = resp->cfge.oexen;
-	info->irx = resp->sgise.irx;
-	info->irxen = resp->cfge.irxen;
-	info->ipv = resp->icfge.ipv;
-	info->oipv = resp->icfge.oipv;
-	info->gst = resp->icfge.gst;
+	memcpy(&entry->cfge, &resp->cfge, cfge_len);
 
 end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_sgit_query_entry);
 
-int ntmp_sgit_delete_entry(struct netc_cbdr *cbdr, u32 entry_id)
+int ntmp_sgclt_delete_entry(struct ntmp_user *user, u32 entry_id)
 {
-	struct sgit_req_nua *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
-
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Fill up NTMP request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_SGIT_ID,
-				NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev,
-			"Delete stream gate instance table entry failed (%d)!", err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
+	return ntmp_delete_entry_by_id(user, NTMP_SGCLT_ID, user->tbl.sgclt_ver,
+				       entry_id, NTMP_EID_REQ_LEN, 0);
 }
-EXPORT_SYMBOL_GPL(ntmp_sgit_delete_entry);
 
-int ntmp_isct_operate_entry(struct netc_cbdr *cbdr, u32 entry_id, int cmd,
-			    struct isct_stse_data *stse)
+int ntmp_isct_set_entry(struct ntmp_user *user, u32 entry_id, int cmd,
+			struct isct_stse_data *stse)
 {
+	struct ntmp_dma_buf data = {.dev = user->dev};
+	bool query = !!(cmd & NTMP_CMD_QUERY);
 	struct isct_resp_query *resp;
-	struct isct_req_data *req;
+	struct ntmp_req_by_eid *req;
 	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	bool query;
-	void *tmp;
+	u16 ua = 0;
+	u32 len;
 	int err;
 
 	/* Check the command. */
 	switch (cmd) {
 	case NTMP_CMD_QUERY:
-	case NTMP_CMD_QD:
 	case NTMP_CMD_QU:
 		if (!stse)
 			return -EINVAL;
@@ -1678,254 +1334,1426 @@ int ntmp_isct_operate_entry(struct netc_cbdr *cbdr, u32 entry_id, int cmd,
 		return -EINVAL;
 	}
 
-	query = !!(cmd & NTMP_CMD_QUERY);
-	data_size = query ? sizeof(*resp) : sizeof(*req);
-
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
+	data.size = query ? sizeof(*resp) : sizeof(*req);
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
 	if (cmd & NTMP_CMD_UPDATE)
-		req->crd.update_act = cpu_to_le16(1);
-	req->entry_id = cpu_to_le32(entry_id);
+		ua = NTMP_GEN_UA_CFGEU;
 
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), query ? sizeof(*resp) : 0);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_ISCT_ID,
-				cmd, NTMP_AM_ENTRY_ID);
+	ntmp_fill_crd_eid(req, user->tbl.isct_ver, 0, ua, entry_id);
+	len = NTMP_LEN(sizeof(*req), query ? sizeof(*resp) : 0);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_ISCT_ID,
+			      cmd, NTMP_AM_ENTRY_ID);
 
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
 	if (err) {
-		dev_err(cbdr->dma_dev,
-			"Operate stream gate instance table entry (%d) failed (%d)!",
-			cmd, err);
+		dev_err(user->dev,
+			"Failed to set ISCT entry 0x%x, cmd:%d err: %pe\n",
+			entry_id, cmd, ERR_PTR(err));
+
 		goto end;
 	}
 
-	if (query) {
-		resp = (struct isct_resp_query *)req;
-		if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-			dev_err(cbdr->dma_dev,
-				"Entry ID doesn't match, query ID:0x%0x, response ID:0x%x\n",
-				entry_id, le32_to_cpu(resp->entry_id));
-			err = -EIO;
-			goto end;
-		}
+	if (!query)
+		goto end;
 
-		*stse = resp->stse;
+	resp = (struct isct_resp_query *)req;
+	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
+		dev_err(user->dev,
+			"ISCT: query EID (0x%0x) doesn't match response EID (0x%x)\n",
+			entry_id, le32_to_cpu(resp->entry_id));
+		err = -EIO;
+
+		goto end;
 	}
 
+	*stse = resp->stse;
+
 end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
-EXPORT_SYMBOL_GPL(ntmp_isct_operate_entry);
+EXPORT_SYMBOL_GPL(ntmp_isct_set_entry);
 
-int ntmp_ipft_add_entry(struct netc_cbdr *cbdr, struct ntmp_ipft_key *key,
-			struct ntmp_ipft_cfg *cfg, u32 *entry_id)
+int ntmp_ipft_add_entry(struct ntmp_user *user, struct ntmp_ipft_entry *entry)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct ipft_resp_query),
+	};
 	struct ipft_resp_query *resp;
-	struct ipft_req_add *req;
+	struct ipft_req_ua *req;
 	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	int i, err;
-	void *tmp;
+	u32 len;
+	int err;
 
-	if (!key || !cfg || !entry_id)
-		return -EINVAL;
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
 
-	data_size = sizeof(*resp);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
+	ntmp_fill_crd(&req->crd, user->tbl.ipft_ver, NTMP_QA_ENTRY_ID,
+		      NTMP_GEN_UA_CFGEU | NTMP_GEN_UA_STSEU);
+	req->ak.keye = entry->keye;
+	req->cfge = entry->cfge;
 
-	/* Fill up NTMP request data buffer */
-	req->crd.update_act = cpu_to_le16(3);
-	req->crd.query_act = 1;
-	req->keye.precedence = cpu_to_le16(key->precedence);
-	req->keye.frm_attr_flags = cpu_to_le16(key->frm_attr_flags);
-	req->keye.frm_attr_flags_mask = cpu_to_le16(key->frm_attr_flags_mask);
-	req->keye.dscp = cpu_to_le16(key->dscp);
-	req->keye.src_port = cpu_to_le16(key->src_port);
-	req->keye.outer_vlan_tci = key->outer_vlan_tci;
-	req->keye.outer_vlan_tci_mask = key->outer_vlan_tci_mask;
-	ether_addr_copy(req->keye.dmac, key->dmac);
-	ether_addr_copy(req->keye.dmac_mask, key->dmac_mask);
-	ether_addr_copy(req->keye.smac, key->smac);
-	ether_addr_copy(req->keye.smac_mask, key->smac_mask);
-	req->keye.inner_vlan_tci = key->inner_vlan_tci;
-	req->keye.inner_vlan_tci_mask = key->inner_vlan_tci_mask;
-	req->keye.ethertype = key->ethertype;
-	req->keye.ethertype_mask = key->ethertype_mask;
-	req->keye.ip_protocol = key->ip_protocol;
-	req->keye.ip_protocol_mask = key->ip_protocol_mask;
-	memcpy(req->keye.ip_src, key->ip_src, sizeof(req->keye.ip_src));
-	memcpy(req->keye.ip_src_mask, key->ip_src_mask, sizeof(req->keye.ip_src_mask));
-	req->keye.l4_src_port = key->l4_src_port;
-	req->keye.l4_src_port_mask = key->l4_src_port_mask;
-	memcpy(req->keye.ip_dst, key->ip_dst, sizeof(req->keye.ip_dst));
-	memcpy(req->keye.ip_dst_mask, key->ip_dst_mask, sizeof(req->keye.ip_dst_mask));
-	req->keye.l4_dst_port = key->l4_dst_port;
-	req->keye.l4_dst_port_mask = key->l4_dst_port_mask;
-	for (i = 0; i < NTMP_IPFT_MAX_PLD_LEN; i++) {
-		req->keye.byte[i].data = key->byte[i].data;
-		req->keye.byte[i].mask = key->byte[i].mask;
-	}
+	len = NTMP_LEN(sizeof(*req), data.size);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_IPFT_ID,
+			      NTMP_CMD_AQ, NTMP_AM_TERNARY_KEY);
 
-	req->cfge.ipv = cfg->ipv;
-	req->cfge.oipv = cfg->oipv;
-	req->cfge.dr = cfg->dr;
-	req->cfge.odr = cfg->odr;
-	req->cfge.filter = cpu_to_le16(cfg->filter);
-	req->cfge.flta_tgt = cpu_to_le32(cfg->flta_tgt);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_IPFT_ID,
-				NTMP_CMD_AQ, NTMP_AM_TERNARY_KEY);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
 	if (err) {
-		dev_err(cbdr->dma_dev,
-			"Add ingress port filter table entry failed (%d)!", err);
+		dev_err(user->dev, "Failed to add IPFT entry, err: %pe\n",
+			ERR_PTR(err));
+
 		goto end;
 	}
 
 	resp = (struct ipft_resp_query *)req;
-	*entry_id = le32_to_cpu(resp->entry_id);
+	entry->entry_id = le32_to_cpu(resp->entry_id);
 
 end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
 EXPORT_SYMBOL_GPL(ntmp_ipft_add_entry);
 
-int ntmp_ipft_query_entry(struct netc_cbdr *cbdr, u32 entry_id,
-			  struct ntmp_ipft_info *info)
+int ntmp_ipft_update_entry(struct ntmp_user *user, u32 entry_id,
+			   struct ipft_cfge_data *cfge)
 {
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct ipft_req_ua),
+	};
+	struct ipft_req_ua *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd(&req->crd, user->tbl.ipft_ver, 0,
+		      NTMP_GEN_UA_CFGEU | NTMP_GEN_UA_STSEU);
+	req->ak.eid.entry_id = cpu_to_le32(entry_id);
+	req->cfge = *cfge;
+
+	len = NTMP_LEN(data.size, NTMP_STATUS_RESP_LEN);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_IPFT_ID,
+			      NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev, "Failed to update IPFT entry, err: %pe\n",
+			ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_ipft_update_entry);
+
+int ntmp_ipft_query_entry(struct ntmp_user *user, u32 entry_id,
+			  bool update, struct ntmp_ipft_entry *entry)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct ipft_resp_query),
+	};
+	u32 req_len = sizeof(struct ipft_req_qd);
 	struct ipft_resp_query *resp;
 	struct ipft_req_qd *req;
-	union netc_cbd cbd;
-	u32 data_size, len;
-	dma_addr_t dma;
-	int i, err;
-	void *tmp;
+	u16 ua = 0;
+	u32 len;
+	int err;
 
-	if (!info || entry_id == NTMP_NULL_ENTRY_ID)
-		return -EINVAL;
-
-	data_size = sizeof(*resp);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Full Query */
-	req->crd.query_act = 0;
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(sizeof(*req), data_size);
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_IPFT_ID,
-				NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err) {
-		dev_err(cbdr->dma_dev,
-			"Query ingress port filter table entry failed (%d)!", err);
-		goto end;
+	/* CFGE_DATA is present when performing an update command,
+	 * but we don't need to set this field because only STSEU
+	 * is updated here.
+	 */
+	if (update) {
+		req_len += sizeof(struct ipft_cfge_data);
+		ua = NTMP_GEN_UA_STSEU;
 	}
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.ipft_ver, 0, ua, entry_id);
+	len = NTMP_LEN(req_len, data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_IPFT_ID, len,
+				     (struct ntmp_req_by_eid *)req,
+				     data.dma, false);
+	if (err)
+		goto end;
 
 	resp = (struct ipft_resp_query *)req;
 	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-		dev_err(cbdr->dma_dev,
-			"Entry ID doesn't match, query ID:0x%0x, response ID:0x%x\n",
+		dev_err(user->dev,
+			"IPFT: query EID 0x%x doesn't match response EID 0x%x\n",
 			entry_id, le32_to_cpu(resp->entry_id));
 		err = -EIO;
+
 		goto end;
 	}
 
-	info->key.precedence = le16_to_cpu(resp->keye.precedence);
-	info->key.frm_attr_flags = le16_to_cpu(resp->keye.frm_attr_flags);
-	info->key.frm_attr_flags_mask = le16_to_cpu(resp->keye.frm_attr_flags_mask);
-	info->key.dscp = le16_to_cpu(resp->keye.dscp);
-	info->key.src_port = le16_to_cpu(resp->keye.src_port);
-	info->key.outer_vlan_tci = resp->keye.outer_vlan_tci;
-	info->key.outer_vlan_tci_mask = resp->keye.outer_vlan_tci_mask;
-	ether_addr_copy(info->key.dmac, resp->keye.dmac);
-	ether_addr_copy(info->key.dmac_mask, resp->keye.dmac_mask);
-	ether_addr_copy(info->key.smac, resp->keye.smac);
-	ether_addr_copy(info->key.smac_mask, resp->keye.smac_mask);
-	info->key.inner_vlan_tci = resp->keye.inner_vlan_tci;
-	info->key.inner_vlan_tci_mask = resp->keye.inner_vlan_tci_mask;
-	info->key.ethertype = resp->keye.ethertype;
-	info->key.ethertype_mask = resp->keye.ethertype_mask;
-	info->key.ip_protocol = resp->keye.ip_protocol;
-	info->key.ip_protocol_mask = resp->keye.ip_protocol_mask;
-	memcpy(info->key.ip_src, resp->keye.ip_src, sizeof(info->key.ip_src));
-	memcpy(info->key.ip_src_mask, resp->keye.ip_src_mask, sizeof(info->key.ip_src_mask));
-	info->key.l4_src_port = resp->keye.l4_src_port;
-	info->key.l4_src_port_mask = resp->keye.l4_src_port_mask;
-	memcpy(info->key.ip_dst, resp->keye.ip_dst, sizeof(info->key.ip_dst));
-	memcpy(info->key.ip_dst_mask, resp->keye.ip_dst_mask, sizeof(info->key.ip_dst_mask));
-	info->key.l4_dst_port = resp->keye.l4_dst_port;
-	info->key.l4_dst_port_mask = resp->keye.l4_dst_port_mask;
-	for (i = 0; i < NTMP_IPFT_MAX_PLD_LEN; i++) {
-		info->key.byte[i].data = resp->keye.byte[i].data;
-		info->key.byte[i].mask = resp->keye.byte[i].mask;
-	}
-	info->match_count = le64_to_cpu(resp->stse.match_count);
-
-	info->cfg.ipv = resp->cfge.ipv;
-	info->cfg.oipv = resp->cfge.oipv;
-	info->cfg.dr = resp->cfge.dr;
-	info->cfg.odr = resp->cfge.odr;
-	info->cfg.filter = le16_to_cpu(resp->cfge.filter);
-	info->cfg.flta_tgt = le32_to_cpu(resp->cfge.flta_tgt);
+	entry->keye = resp->keye;
+	entry->match_count = resp->match_count;
+	entry->cfge = resp->cfge;
 
 end:
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
+	ntmp_free_data_mem(&data);
 
 	return err;
 }
 EXPORT_SYMBOL_GPL(ntmp_ipft_query_entry);
 
-int ntmp_ipft_delete_entry(struct netc_cbdr *cbdr, u32 entry_id)
+int ntmp_ipft_delete_entry(struct ntmp_user *user, u32 entry_id)
 {
-	struct ipft_resp_nq *resp;
-	struct ipft_req_qd *req;
-	union netc_cbd cbd;
-	u32 len, data_size;
-	dma_addr_t dma;
-	void *tmp;
-	int err;
+	u32 req_len = sizeof(struct ipft_req_qd);
 
-	data_size = sizeof(*req);
-	tmp = ntmp_alloc_data_mem(cbdr, data_size, &dma, (void **)&req);
-	if (!tmp)
-		return -ENOMEM;
-
-	/* Set mac address filter table request data buffer */
-	req->entry_id = cpu_to_le32(entry_id);
-
-	/* Request header */
-	len = NTMP_REQ_RESP_LEN(data_size, sizeof(*resp));
-	ntmp_fill_request_headr(&cbd, dma, len, NTMP_IPFT_ID,
-				NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
-
-	err = netc_xmit_ntmp_cmd(cbdr, &cbd);
-	if (err)
-		dev_err(cbdr->dma_dev,
-			"Delete ingress port filter table entry failed (%d)!", err);
-
-	ntmp_free_data_mem(cbdr, data_size, tmp, dma);
-
-	return err;
+	return ntmp_delete_entry_by_id(user, NTMP_IPFT_ID, user->tbl.ipft_ver,
+				       entry_id, req_len, NTMP_STATUS_RESP_LEN);
 }
 EXPORT_SYMBOL_GPL(ntmp_ipft_delete_entry);
 
-MODULE_AUTHOR("Wei Fang <wei.fang@nxp.com>");
-MODULE_DESCRIPTION("NXP NETC Table Management Protocol");
+int ntmp_rfst_add_entry(struct ntmp_user *user, u32 entry_id,
+			struct rfst_entry_data *rfst)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct rfst_req_add),
+	};
+	struct rfst_req_add *req;
+	union netc_cbd cbd;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.rfst_ver, 0, 0, entry_id);
+	req->keye = rfst->keye;
+	req->cfge = rfst->cfge;
+
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_RFST_ID, NTMP_CMD_ADD, NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev, "Failed to add RFST entry 0x%x, err: %pe\n",
+			entry_id, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_rfst_add_entry);
+
+int ntmp_rfst_query_entry(struct ntmp_user *user, u32 entry_id,
+			  struct rfst_entry_data *rfst)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct rfst_resp_query),
+	};
+	struct rfst_resp_query *resp;
+	struct ntmp_req_by_eid *req;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(req, user->tbl.rfst_ver, 0, 0, entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_RFST_ID, len,
+				     req, data.dma, true);
+	if (err)
+		goto end;
+
+	resp = (struct rfst_resp_query *)req;
+	rfst->keye = resp->keye;
+	rfst->cfge = resp->cfge;
+	rfst->matched_frames = resp->matched_frames;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_rfst_query_entry);
+
+int ntmp_rfst_delete_entry(struct ntmp_user *user, u32 entry_id)
+{
+	return ntmp_delete_entry_by_id(user, NTMP_RFST_ID, user->tbl.rfst_ver,
+				       entry_id, NTMP_EID_REQ_LEN, 0);
+}
+EXPORT_SYMBOL_GPL(ntmp_rfst_delete_entry);
+
+/**
+ * ntmp_fdbt_update_activity_element - update the aging time of all the dynamic
+ * entries in the FDB table.
+ * @user: target ntmp_user struct
+ *
+ * A single activity update management could be used to process all the dynamic
+ * entries in the FDB table. When hardware process an activity updata management
+ * command for an entry in the FDB table and the entry does not have its activity
+ * flag set, the activity counter is incremented, If, however, the activity flag
+ * is set, then both the activity flag and activity counter are reset.
+ * Software can issue the activity update management commands at predefined times
+ * and the value of the activity counter can then be used to estimate the period
+ * of how long an FDB entry has been inactive.
+ *
+ * Returns 0 on success or < 0 on error
+ */
+int ntmp_fdbt_update_activity_element(struct ntmp_user *user)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct fdbt_req_ua),
+	};
+	struct fdbt_req_ua *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.fdbt_ver, 0, FDBT_UA_ACTEU);
+	req->ak.search.resume_eid = cpu_to_le32(NTMP_NULL_ENTRY_ID);
+
+	/* Request header */
+	len = NTMP_LEN(data.size, NTMP_STATUS_RESP_LEN);
+	/* For activity update, the access method must be search */
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_FDBT_ID,
+			      NTMP_CMD_UPDATE, NTMP_AM_SEARCH);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev, "Failed to update FDBT activity, err: %pe\n",
+			ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_fdbt_update_activity_element);
+
+/**
+ * ntmp_fdbt_delete_aging_entries - delete all the matched dynamic entries
+ * in the FDB table
+ * @user: target ntmp_user struct
+ * @act_cnt: the target value of the activity counter
+ *
+ * The matching rule is that the activity flag is not set and the activity
+ * counter is greater than or equal to act_cnt
+ *
+ * Returns 0 on success or < 0 on error
+ */
+int ntmp_fdbt_delete_aging_entries(struct ntmp_user *user, u8 act_cnt)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct fdbt_req_qd),
+	};
+	struct fdbt_req_qd *req;
+	u32 cfg = FDBT_DYNAMIC;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	if (act_cnt > FDBT_MAX_ACT_CNT)
+		act_cnt = FDBT_MAX_ACT_CNT;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.fdbt_ver, 0, 0);
+	req->ak.search.resume_eid = cpu_to_le32(NTMP_NULL_ENTRY_ID);
+	req->ak.search.cfge.cfg = cpu_to_le32(cfg);
+	req->ak.search.acte.act = act_cnt & FDBT_ACT_CNT;
+	/* Entry match with ACTE_DATA[ACT_FLAG] AND match >= ACTE_DATA[ACT_CNT] */
+	req->ak.search.acte_mc = FDBT_ACTE_MC;
+	req->ak.search.cfge_mc = FDBT_CFGE_MC_DYNAMIC;
+
+	/* Request header */
+	len = NTMP_LEN(data.size, NTMP_STATUS_RESP_LEN);
+	/* For activity update, the access method must be search */
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_FDBT_ID,
+			      NTMP_CMD_DELETE, NTMP_AM_SEARCH);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to delete aging FDBT entries, err: %pe\n",
+			ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_fdbt_delete_aging_entries);
+
+/**
+ * ntmp_fdbt_add_entry - add an entry into the FDB table
+ * @user: target ntmp_user struct
+ * @entry_id: retruned value, the ID of the FDB entry
+ * @keye: key element data
+ * @cfge: configuration element data
+ *
+ * Returns two values: entry_id and error code (0 on success or < 0 on error)
+ */
+int ntmp_fdbt_add_entry(struct ntmp_user *user, u32 *entry_id,
+			struct fdbt_keye_data *keye,
+			struct fdbt_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct fdbt_req_ua),
+	};
+	struct fdbt_resp_query *resp;
+	struct fdbt_req_ua *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.fdbt_ver, NTMP_QA_ENTRY_ID,
+		      NTMP_GEN_UA_CFGEU);
+	req->ak.exact.keye = *keye;
+	req->cfge = *cfge;
+
+	len = NTMP_LEN(data.size, sizeof(*resp));
+	/* The entry id is allotted by hardware, so we need to a query
+	 * action after the add action to get the entry id from hardware.
+	 */
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_FDBT_ID,
+			      NTMP_CMD_AQ, NTMP_AM_EXACT_KEY);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err) {
+		dev_err(user->dev, "Failed to add FDBT entry, err: %pe\n",
+			ERR_PTR(err));
+		goto end;
+	}
+
+	if (entry_id) {
+		resp = (struct fdbt_resp_query *)req;
+		*entry_id = le32_to_cpu(resp->entry_id);
+	}
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_fdbt_add_entry);
+
+int ntmp_fdbt_update_entry(struct ntmp_user *user, u32 entry_id,
+			   struct fdbt_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct fdbt_req_ua),
+	};
+	struct fdbt_req_ua *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.fdbt_ver, 0, NTMP_GEN_UA_CFGEU);
+	req->ak.eid.entry_id = cpu_to_le32(entry_id);
+	req->cfge = *cfge;
+
+	/* Request header */
+	len = NTMP_LEN(data.size, NTMP_STATUS_RESP_LEN);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_FDBT_ID,
+			      NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev, "Failed to update FDBT entry, err: %pe\n",
+			ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_fdbt_update_entry);
+
+int ntmp_fdbt_delete_entry(struct ntmp_user *user, u32 entry_id)
+{
+	u32 req_len = sizeof(struct fdbt_req_qd);
+
+	return ntmp_delete_entry_by_id(user, NTMP_FDBT_ID, user->tbl.fdbt_ver,
+				       entry_id, req_len, NTMP_STATUS_RESP_LEN);
+}
+EXPORT_SYMBOL_GPL(ntmp_fdbt_delete_entry);
+
+int ntmp_fdbt_delete_port_dynamic_entries(struct ntmp_user *user, int port)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct fdbt_req_qd),
+	};
+	struct fdbt_req_qd *req;
+	u32 cfg = FDBT_DYNAMIC;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.fdbt_ver, 0, 0);
+	req->ak.search.resume_eid = cpu_to_le32(NTMP_NULL_ENTRY_ID);
+	req->ak.search.cfge.port_bitmap = cpu_to_le32(BIT(port));
+	req->ak.search.cfge.cfg = cpu_to_le32(cfg);
+	/* Match CFGE_DATA[DYNAMIC & PORT_BITMAP] field */
+	req->ak.search.cfge_mc = FDBT_CFGE_MC_DYNAMIC_AND_PORT_BITMAP;
+
+	/* Request header */
+	len = NTMP_LEN(data.size, NTMP_STATUS_RESP_LEN);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_FDBT_ID,
+			      NTMP_CMD_DELETE, NTMP_AM_SEARCH);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to delete dynamic FDBT entries on port %d, err: %pe\n",
+			port,  ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_fdbt_delete_port_dynamic_entries);
+
+int ntmp_fdbt_search_port_entry(struct ntmp_user *user, int port,
+				u32 *resume_entry_id, u32 *entry_id,
+				struct fdbt_entry_data *fdbt)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct fdbt_req_qd),
+	};
+	struct fdbt_resp_query *resp;
+	struct fdbt_req_qd *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.fdbt_ver, 0, 0);
+	req->ak.search.resume_eid = cpu_to_le32(*resume_entry_id);
+	req->ak.search.cfge.port_bitmap = cpu_to_le32(BIT(port));
+	/* Match CFGE_DATA[PORT_BITMAP] field */
+	req->ak.search.cfge_mc = FDBT_CFGE_MC_PORT_BITMAP;
+
+	/* Request header */
+	len = NTMP_LEN(data.size, sizeof(*resp));
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_FDBT_ID,
+			      NTMP_CMD_QUERY, NTMP_AM_SEARCH);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err) {
+		dev_err(user->dev,
+			"Failed to search FDBT entry on port %d, err: %pe\n",
+			port, ERR_PTR(err));
+		goto end;
+	}
+
+	if (!cbd.resp_hdr.num_matched) {
+		*entry_id = NTMP_NULL_ENTRY_ID;
+		*resume_entry_id = NTMP_NULL_ENTRY_ID;
+		goto end;
+	}
+
+	resp = (struct fdbt_resp_query *)req;
+	*entry_id = le32_to_cpu(resp->entry_id);
+	*resume_entry_id = le32_to_cpu(resp->status);
+	fdbt->keye = resp->keye;
+	fdbt->cfge = resp->cfge;
+	fdbt->acte = resp->acte;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_fdbt_search_port_entry);
+
+/**
+ * ntmp_vft_add_entry - add an entry into the VLAN filter table
+ * @user: target ntmp_user struct
+ * @entry_id: retruned value, the ID of the Vlan filter entry
+ * @vid: VLAN ID
+ * @cfge: configuration elemenet data
+ *
+ * Returns two values: entry_id and error code (0 on success or < 0 on error)
+ */
+int ntmp_vft_add_entry(struct ntmp_user *user, u32 *entry_id,
+		       u16 vid, struct vft_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct vft_resp_query),
+	};
+	struct vft_resp_query *resp;
+	struct vft_req_ua *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.vft_ver, NTMP_QA_ENTRY_ID,
+		      NTMP_GEN_UA_CFGEU);
+	req->ak.exact.vid = cpu_to_le16(vid);
+	req->cfge = *cfge;
+
+	/* Request header */
+	len = NTMP_LEN(sizeof(*req), data.size);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_VFT_ID,
+			      NTMP_CMD_AQ, NTMP_AM_EXACT_KEY);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err) {
+		dev_err(user->dev,
+			"Failed to add VFT entry, vid: %u, err: %pe\n",
+			vid, ERR_PTR(err));
+		goto end;
+	}
+
+	if (entry_id) {
+		resp = (struct vft_resp_query *)req;
+		*entry_id = le32_to_cpu(resp->entry_id);
+	}
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_vft_add_entry);
+
+int ntmp_vft_update_entry(struct ntmp_user *user, u16 vid,
+			  struct vft_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct vft_req_ua),
+	};
+	struct vft_req_ua *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.vft_ver, 0, NTMP_GEN_UA_CFGEU);
+	req->ak.exact.vid = cpu_to_le16(vid);
+	req->cfge = *cfge;
+
+	/* Request header */
+	len = NTMP_LEN(data.size, NTMP_STATUS_RESP_LEN);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_VFT_ID,
+			      NTMP_CMD_UPDATE, NTMP_AM_EXACT_KEY);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to update VFT entry, vid: %u, err: %pe\n",
+			vid, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_vft_update_entry);
+
+int ntmp_vft_delete_entry(struct ntmp_user *user, u16 vid)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct vft_req_qd),
+	};
+	struct vft_req_qd *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.vft_ver, 0, 0);
+	req->ak.exact.vid = cpu_to_le16(vid);
+
+	/* Request header */
+	len = NTMP_LEN(data.size, NTMP_STATUS_RESP_LEN);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_VFT_ID,
+			      NTMP_CMD_DELETE, NTMP_AM_EXACT_KEY);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to delete VFT entry, vid: %u, err: %pe\n",
+			vid, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_vft_delete_entry);
+
+int ntmp_vft_search_entry(struct ntmp_user *user, u32 *resume_eid,
+			  u32 *entry_id, u16 *vid,
+			  struct vft_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct vft_resp_query),
+	};
+	struct vft_resp_query *resp;
+	struct vft_req_qd *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.vft_ver, 0, 0);
+	req->ak.resume_entry_id = cpu_to_le32(*resume_eid);
+
+	/* Request header */
+	len = NTMP_LEN(sizeof(*req), data.size);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_VFT_ID,
+			      NTMP_CMD_QUERY, NTMP_AM_SEARCH);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err) {
+		dev_err(user->dev, "Failed to search VFT entry, err: %pe\n",
+			ERR_PTR(err));
+		goto end;
+	}
+
+	if (!cbd.resp_hdr.num_matched) {
+		*entry_id = NTMP_NULL_ENTRY_ID;
+		*resume_eid = NTMP_NULL_ENTRY_ID;
+		goto end;
+	}
+
+	resp = (struct vft_resp_query *)req;
+	/* Get the response resume_entry_id to continue search */
+	*resume_eid = le32_to_cpu(resp->status);
+	*entry_id = le32_to_cpu(resp->entry_id);
+	*cfge = resp->cfge;
+	*vid = le16_to_cpu(resp->vid);
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_vft_search_entry);
+
+int ntmp_vft_query_entry_by_vid(struct ntmp_user *user, u16 vid,
+				u32 *entry_id, struct vft_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct vft_resp_query),
+	};
+	struct vft_resp_query *resp;
+	struct vft_req_qd *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd(&req->crd, user->tbl.vft_ver, 0, 0);
+	req->ak.exact.vid = cpu_to_le16(vid);
+
+	/* Request header */
+	len = NTMP_LEN(sizeof(*req), data.size);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_VFT_ID,
+			      NTMP_CMD_QUERY, NTMP_AM_EXACT_KEY);
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err) {
+		dev_err(user->dev,
+			"Failed to search VFT entry, vid:%u, err: %pe\n",
+			vid, ERR_PTR(err));
+		goto end;
+	}
+
+	if (!cbd.resp_hdr.num_matched) {
+		*entry_id = NTMP_NULL_ENTRY_ID;
+		goto end;
+	}
+
+	resp = (struct vft_resp_query *)req;
+	if (vid != le16_to_cpu(resp->vid)) {
+		dev_err(user->dev,
+			"IPFT: query VID %u doesn't match response VID %u\n",
+			le16_to_cpu(resp->vid), vid);
+		err = -EINVAL;
+		goto end;
+	}
+
+	*entry_id = le32_to_cpu(resp->entry_id);
+	*cfge = resp->cfge;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_vft_query_entry_by_vid);
+
+int ntmp_ett_add_or_update_entry(struct ntmp_user *user, u32 entry_id,
+				 bool add, struct ett_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct ett_req_ua),
+	};
+	struct ett_req_ua *req;
+	union netc_cbd cbd;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.ett_ver, 0,
+			  NTMP_GEN_UA_CFGEU, entry_id);
+	req->cfge = *cfge;
+
+	/* Request header */
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_ETT_ID, add ? NTMP_CMD_ADD : NTMP_CMD_UPDATE,
+			      NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to %s ETT entry 0x%x, err :%ps\n",
+			add ? "Add" : "Update", entry_id, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_ett_add_or_update_entry);
+
+int ntmp_ett_delete_entry(struct ntmp_user *user, u32 entry_id)
+{
+	return ntmp_delete_entry_by_id(user, NTMP_ETT_ID, user->tbl.ett_ver,
+				       entry_id, NTMP_EID_REQ_LEN, 0);
+}
+EXPORT_SYMBOL_GPL(ntmp_ett_delete_entry);
+
+int ntmp_ett_query_entry(struct ntmp_user *user, u32 entry_id,
+			 struct ett_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct ett_resp_query),
+	};
+	struct ntmp_req_by_eid *req;
+	struct ett_resp_query *resp;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(req, user->tbl.ett_ver, 0, 0, entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_ETT_ID, len,
+				     req, data.dma, true);
+	if (err)
+		goto end;
+
+	resp = (struct ett_resp_query *)req;
+	*cfge = resp->cfge;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_ett_query_entry);
+
+int ntmp_isgt_add_or_update_entry(struct ntmp_user *user, u32 entry_id,
+				  bool add, struct isgt_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct isgt_req_ua),
+	};
+	struct isgt_req_ua *req;
+	union netc_cbd cbd;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.isgt_ver, 0,
+			  NTMP_GEN_UA_CFGEU | ISGT_UA_SGSEU, entry_id);
+	req->cfge = *cfge;
+
+	/* Request header */
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_ISGT_ID, add ? NTMP_CMD_ADD : NTMP_CMD_UPDATE,
+			      NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to %s ISGT entry 0x%x, err :%pe\n",
+			add ? "Add" : "Update", entry_id, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_isgt_add_or_update_entry);
+
+int ntmp_isgt_query_entry(struct ntmp_user *user, u32 entry_id,
+			  struct isgt_entry_data *isgt)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct isgt_resp_query),
+	};
+	struct isgt_resp_query *resp;
+	struct ntmp_req_by_eid *req;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(req, user->tbl.isgt_ver, 0, 0, entry_id);
+	err = ntmp_query_entry_by_id(user, NTMP_ISGT_ID,
+				     NTMP_LEN(sizeof(*req), data.size),
+				     req, data.dma, true);
+	if (err)
+		goto end;
+
+	resp = (struct isgt_resp_query *)req;
+	isgt->sgse = resp->sgse;
+	isgt->cfge = resp->cfge;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_isgt_query_entry);
+
+int ntmp_isgt_delete_entry(struct ntmp_user *user, u32 entry_id)
+{
+	return ntmp_delete_entry_by_id(user, NTMP_ISGT_ID, user->tbl.isgt_ver,
+				       entry_id, NTMP_EID_REQ_LEN, 0);
+}
+EXPORT_SYMBOL_GPL(ntmp_isgt_delete_entry);
+
+int ntmp_esrt_update_entry(struct ntmp_user *user, u32 entry_id,
+			   struct esrt_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct esrt_req_update),
+	};
+	struct esrt_req_update *req;
+	union netc_cbd cbd;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.esrt_ver, 0, NTMP_GEN_UA_CFGEU |
+			  NTMP_GEN_UA_STSEU | ESRT_UA_SRSEU, entry_id);
+	req->cfge = *cfge;
+
+	/* Request header */
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_ESRT_ID, NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev, "Failed to update ESRT entry 0x%x, err: %pe\n",
+			entry_id, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_esrt_update_entry);
+
+int ntmp_esrt_query_entry(struct ntmp_user *user, u32 entry_id,
+			  struct esrt_entry_data *erst)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct esrt_resp_query),
+	};
+	struct esrt_resp_query *resp;
+	struct ntmp_req_by_eid *req;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(req, user->tbl.esrt_ver, 0, 0, entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_ESRT_ID, len,
+				     req, data.dma, true);
+	if (err)
+		goto end;
+
+	resp = (struct esrt_resp_query *)req;
+	erst->stse = resp->stse;
+	erst->cfge = resp->cfge;
+	erst->srse = resp->srse;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_esrt_query_entry);
+
+int ntmp_ect_update_entry(struct ntmp_user *user, u32 entry_id)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct ntmp_req_by_eid),
+	};
+	struct ntmp_req_by_eid *req;
+	union netc_cbd cbd;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd_eid(req, user->tbl.ect_ver, 0, ECT_UA_STSEU, entry_id);
+
+	/* Request header */
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_ECT_ID, NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev, "Failed to update ECT entry 0x%x, err: %pe\n",
+			entry_id, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_ect_update_entry);
+
+int ntmp_ect_query_entry(struct ntmp_user *user, u32 entry_id,
+			 struct ect_stse_data *stse, bool update)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct ect_resp_query),
+	};
+	struct ect_resp_query *resp;
+	struct ntmp_req_by_eid *req;
+	union netc_cbd cbd;
+	u16 ua = 0;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	if (update)
+		/* Query, followed by Update. */
+		ua = ECT_UA_STSEU;
+
+	ntmp_fill_crd_eid(req, user->tbl.ect_ver, 0, ua, entry_id);
+
+	/* Request header */
+	len = NTMP_LEN(sizeof(*req), data.size);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_ECT_ID,
+			      update ? NTMP_CMD_QU : NTMP_CMD_QUERY,
+			      NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err) {
+		dev_err(user->dev, "Failed to query ECT entry 0x%x, err: %pe\n",
+			entry_id, ERR_PTR(err));
+		goto end;
+	}
+
+	resp = (struct ect_resp_query *)req;
+	if (unlikely(entry_id != le32_to_cpu(resp->entry_id))) {
+		dev_err(user->dev,
+			"ECT: query EID 0x%x doesn't match response EID 0x%x",
+			entry_id, le32_to_cpu(resp->entry_id));
+		err = -EIO;
+		goto end;
+	}
+
+	*stse = resp->stse;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_ect_query_entry);
+
+int ntmp_fmt_add_or_update_entry(struct ntmp_user *user, u32 entry_id,
+				 bool add, struct fmt_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct fmt_req_ua),
+	};
+	struct fmt_req_ua *req;
+	union netc_cbd cbd;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	/* Request data */
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.fmt_ver, 0,
+			  NTMP_GEN_UA_CFGEU, entry_id);
+	req->cfge = *cfge;
+
+	/* Request header */
+	len = NTMP_LEN(data.size, 0);
+	ntmp_fill_request_hdr(&cbd, data.dma, len, NTMP_FMT_ID,
+			      add ? NTMP_CMD_ADD : NTMP_CMD_UPDATE,
+			      NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to %s FMT entry 0x%0x, err: %pe\n",
+			add ? "Add" : "Update", entry_id, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_fmt_add_or_update_entry);
+
+int ntmp_fmt_delete_entry(struct ntmp_user *user, u32 entry_id)
+{
+	return ntmp_delete_entry_by_id(user, NTMP_FMT_ID, user->tbl.fmt_ver,
+				       entry_id, NTMP_EID_REQ_LEN, 0);
+}
+EXPORT_SYMBOL_GPL(ntmp_fmt_delete_entry);
+
+int ntmp_fmt_query_entry(struct ntmp_user *user, u32 entry_id,
+			 struct fmt_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct fmt_resp_query),
+	};
+	struct ntmp_req_by_eid *req;
+	struct fmt_resp_query *resp;
+	u32 len;
+	int err;
+
+	if (entry_id == NTMP_NULL_ENTRY_ID)
+		return -EINVAL;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(req, user->tbl.fmt_ver, 0, 0, entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_FMT_ID, len,
+				     req, data.dma, true);
+	if (err)
+		goto end;
+
+	resp = (struct fmt_resp_query *)req;
+	*cfge = resp->cfge;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_fmt_query_entry);
+
+int ntmp_bpt_update_entry(struct ntmp_user *user, u32 entry_id,
+			  struct bpt_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct bpt_req_update),
+	};
+	struct bpt_req_update *req;
+	union netc_cbd cbd;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.bpt_ver, 0,
+			  NTMP_GEN_UA_CFGEU | BPT_UA_BPSEU, entry_id);
+	req->cfge = *cfge;
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_BPT_ID, NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to update BPT entry 0x%x, err: %pe\n",
+			entry_id, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_bpt_update_entry);
+
+int ntmp_bpt_query_entry(struct ntmp_user *user, u32 entry_id,
+			 struct bpt_entry_data *bpt)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct bpt_resp_query),
+	};
+	struct ntmp_req_by_eid *req;
+	struct bpt_resp_query *resp;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(req, user->tbl.bpt_ver, 0, 0, entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_BPT_ID, len,
+				     req, data.dma, true);
+	if (err)
+		goto end;
+
+	resp = (struct bpt_resp_query *)req;
+	bpt->bpse = resp->bpse;
+	bpt->cfge = resp->cfge;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_bpt_query_entry);
+
+int ntmp_sbpt_update_entry(struct ntmp_user *user, u32 entry_id,
+			   struct sbpt_cfge_data *cfge)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct sbpt_req_update),
+	};
+	struct sbpt_req_update *req;
+	union netc_cbd cbd;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.sbpt_ver, 0,
+			  NTMP_GEN_UA_CFGEU | SBPT_UA_BPSEU, entry_id);
+	req->cfge = *cfge;
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_SBPT_ID, NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to update SBPT entry 0x%x, err: %pe\n",
+			entry_id, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_sbpt_update_entry);
+
+int ntmp_sbpt_query_entry(struct ntmp_user *user, u32 entry_id,
+			  struct sbpt_entry_data *sbpt)
+{
+	struct ntmp_dma_buf data = {
+		.dev = user->dev,
+		.size = sizeof(struct sbpt_resp_query),
+	};
+	struct sbpt_resp_query *resp;
+	struct ntmp_req_by_eid *req;
+	u32 len;
+	int err;
+
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(req, user->tbl.sbpt_ver, 0, 0, entry_id);
+	len =  NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_SBPT_ID, len,
+				     req, data.dma, true);
+	if (err)
+		goto end;
+
+	resp = (struct sbpt_resp_query *)req;
+	sbpt->sbpse = resp->sbpse;
+	sbpt->cfge = resp->cfge;
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_sbpt_query_entry);
+
+int ntmp_fmdt_update_entry(struct ntmp_user *user, u32 entry_id,
+			   u8 *data_buff, u32 data_len)
+{
+	struct ntmp_dma_buf data = {.dev = user->dev};
+	struct fmdt_req_update *req;
+	u32 align = data_len;
+	union netc_cbd cbd;
+	int err;
+
+	if (align % FMDT_DATA_LEN_ALIGN) {
+		align = DIV_ROUND_UP(align, FMDT_DATA_LEN_ALIGN);
+		align *= FMDT_DATA_LEN_ALIGN;
+	}
+
+	data.size = struct_size(req, data, align);
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(&req->rbe, user->tbl.fmdt_ver, 0,
+			  NTMP_GEN_UA_CFGEU, entry_id);
+
+	/* Fill configuration element data */
+	memcpy(req->data, data_buff, data_len);
+	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+			      NTMP_FMDT_ID, NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
+
+	err = netc_xmit_ntmp_cmd(user, &cbd);
+	if (err)
+		dev_err(user->dev,
+			"Failed to update FMDT entry 0x%x, err: %pe\n",
+			entry_id, ERR_PTR(err));
+
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_fmdt_update_entry);
+
+int ntmp_fmdt_query_entry(struct ntmp_user *user, u32 entry_id,
+			  u8 *data_buff, u32 data_len)
+{
+	struct ntmp_dma_buf data = {.dev = user->dev};
+	struct fmdt_resp_query *resp;
+	struct ntmp_req_by_eid *req;
+	u32 len, align = data_len;
+	int err;
+
+	if (entry_id == NTMP_NULL_ENTRY_ID)
+		return -EINVAL;
+
+	if (align % FMDT_DATA_LEN_ALIGN) {
+		align = DIV_ROUND_UP(align, FMDT_DATA_LEN_ALIGN);
+		align *= FMDT_DATA_LEN_ALIGN;
+	}
+
+	data.size = struct_size(resp, data, align);
+	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	if (err)
+		return err;
+
+	ntmp_fill_crd_eid(req, user->tbl.fmdt_ver, 0, 0, entry_id);
+	len = NTMP_LEN(sizeof(*req), data.size);
+	err = ntmp_query_entry_by_id(user, NTMP_FMDT_ID, len,
+				     req, data.dma, true);
+	if (err)
+		goto end;
+
+	resp = (struct fmdt_resp_query *)req;
+	memcpy(data_buff, resp->data, data_len);
+
+end:
+	ntmp_free_data_mem(&data);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ntmp_fmdt_query_entry);
+
+MODULE_DESCRIPTION("NXP NETC Library");
 MODULE_LICENSE("Dual BSD/GPL");

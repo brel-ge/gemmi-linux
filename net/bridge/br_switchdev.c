@@ -17,6 +17,9 @@ static bool nbp_switchdev_can_offload_tx_fwd(const struct net_bridge_port *p,
 	if (!static_branch_unlikely(&br_switchdev_tx_fwd_offload))
 		return false;
 
+	if (br_multicast_igmp_type(skb))
+		return false;
+
 	return (p->flags & BR_TX_FWD_OFFLOAD) &&
 	       (p->hwdom != BR_INPUT_SKB_CB(skb)->src_hwdom);
 }
@@ -345,6 +348,7 @@ br_switchdev_fdb_replay(const struct net_device *br_dev, const void *ctx,
 	return err;
 }
 
+#ifdef CONFIG_BRIDGE_VLAN_FILTERING
 static int br_switchdev_vlan_attr_replay(struct net_device *br_dev,
 					 const void *ctx,
 					 struct notifier_block *nb,
@@ -408,7 +412,8 @@ br_switchdev_vlan_replay_one(struct notifier_block *nb,
 	return notifier_to_errno(err);
 }
 
-static int br_switchdev_vlan_replay_group(struct notifier_block *nb,
+static int br_switchdev_vlan_replay_group(struct net_bridge *br,
+					  struct notifier_block *nb,
 					  struct net_device *dev,
 					  struct net_bridge_vlan_group *vg,
 					  const void *ctx, unsigned long action,
@@ -434,20 +439,34 @@ static int br_switchdev_vlan_replay_group(struct notifier_block *nb,
 		if (!br_vlan_should_use(v))
 			continue;
 
+		/* Migrate VLANs that were installed on non-offloaded
+		 * intermediate bridge ports (bonding) from the 8021q filters
+		 * to switchdev if an offloading driver has appeared in the
+		 * meantime.
+		 */
+		if (!(v->priv_flags & BR_VLFLAG_ADDED_BY_SWITCHDEV))
+			vlan_vid_del(dev, br->vlan_proto, v->vid);
+
 		err = br_switchdev_vlan_replay_one(nb, dev, &vlan, ctx,
 						   action, extack);
-		if (err)
+		if (err) {
+			vlan_vid_add(dev, br->vlan_proto, v->vid);
 			return err;
+		}
+
+		v->priv_flags |= BR_VLFLAG_ADDED_BY_SWITCHDEV;
 	}
 
 	return 0;
 }
+#endif
 
 static int br_switchdev_vlan_replay(struct net_device *br_dev,
 				    const void *ctx, bool adding,
 				    struct notifier_block *nb,
 				    struct netlink_ext_ack *extack)
 {
+#ifdef CONFIG_BRIDGE_VLAN_FILTERING
 	struct net_bridge *br = netdev_priv(br_dev);
 	struct net_bridge_port *p;
 	unsigned long action;
@@ -466,7 +485,7 @@ static int br_switchdev_vlan_replay(struct net_device *br_dev,
 	else
 		action = SWITCHDEV_PORT_OBJ_DEL;
 
-	err = br_switchdev_vlan_replay_group(nb, br_dev, br_vlan_group(br),
+	err = br_switchdev_vlan_replay_group(br, nb, br_dev, br_vlan_group(br),
 					     ctx, action, extack);
 	if (err)
 		return err;
@@ -474,7 +493,7 @@ static int br_switchdev_vlan_replay(struct net_device *br_dev,
 	list_for_each_entry(p, &br->port_list, list) {
 		struct net_device *dev = p->dev;
 
-		err = br_switchdev_vlan_replay_group(nb, dev,
+		err = br_switchdev_vlan_replay_group(br, nb, dev,
 						     nbp_vlan_group(p),
 						     ctx, action, extack);
 		if (err)
@@ -486,6 +505,7 @@ static int br_switchdev_vlan_replay(struct net_device *br_dev,
 		if (err)
 			return err;
 	}
+#endif
 
 	return 0;
 }
@@ -504,9 +524,10 @@ static void br_switchdev_mdb_complete(struct net_device *dev, int err, void *pri
 	struct net_bridge_mdb_entry *mp;
 	struct net_bridge_port *port = data->port;
 	struct net_bridge *br = port->br;
+	u8 old_flags;
 
-	if (err)
-		goto err;
+	if (err == -EOPNOTSUPP)
+		goto out_free;
 
 	spin_lock_bh(&br->multicast_lock);
 	mp = br_mdb_ip_get(br, &data->ip);
@@ -516,11 +537,15 @@ static void br_switchdev_mdb_complete(struct net_device *dev, int err, void *pri
 	     pp = &p->next) {
 		if (p->key.port != port)
 			continue;
-		p->flags |= MDB_PG_FLAGS_OFFLOAD;
+
+		old_flags = p->flags;
+		br_multicast_set_pg_offload_flags(p, !err);
+		if (br_mdb_should_notify(br, old_flags ^ p->flags))
+			br_mdb_flag_change_notify(br->dev, mp, p);
 	}
 out:
 	spin_unlock_bh(&br->multicast_lock);
-err:
+out_free:
 	kfree(priv);
 }
 
@@ -829,7 +854,7 @@ int br_switchdev_port_offload(struct net_bridge_port *p,
 	struct netdev_phys_item_id ppid;
 	int err;
 
-	err = dev_get_port_parent_id(dev, &ppid, false);
+	err = netif_get_port_parent_id(dev, &ppid, false);
 	if (err)
 		return err;
 

@@ -222,10 +222,6 @@
 	};
 };
 
-&cameradev {
-	status = "okay";
-};
-
 &easrc {
 	fsl,asrc-rate  = <48000>;
 	status = "okay";
@@ -527,12 +523,8 @@
 	status = "okay";
 };
 
-&isi_0 {
+&isi {
 	status = "okay";
-
-	cap_device {
-		status = "okay";
-	};
 };
 
 &lcdif {
@@ -604,7 +596,7 @@
 	};
 };
 
-&mipi_csi_1 {
+&mipi_csi {
 	#address-cells = <1>;
 	#size-cells = <0>;
 	status = "okay";
@@ -633,13 +625,11 @@
 			attach-bridge;
 		};
 	};
+};
 
-	port@2 {
-		mipi_dsi_out: endpoint {
-			attach-bridge;
-			remote-endpoint = <&bridge_in_dsi>;
-		};
-	};
+&mipi_dsi_out {
+	attach-bridge;
+	remote-endpoint = <&bridge_in_dsi>;
 };
 
 &pwm2 {

@@ -1793,7 +1793,6 @@ void brcmf_fws_rxreorder(struct brcmf_if *ifp, struct sk_buff *pkt, bool inirq)
 	struct sk_buff_head reorder_list;
 	struct sk_buff *pnext;
 	u8 flags;
-	u32 buf_size;
 
 	reorder_data = ((struct brcmf_skb_reorder_data *)pkt->cb)->reorder;
 	flow_id = reorder_data[BRCMF_RXREORDER_FLOWID_OFFSET];
@@ -1828,15 +1827,13 @@ void brcmf_fws_rxreorder(struct brcmf_if *ifp, struct sk_buff *pkt, bool inirq)
 	}
 	/* from here on we need a flow reorder instance */
 	if (rfi == NULL) {
-		buf_size = sizeof(*rfi);
 		max_idx = reorder_data[BRCMF_RXREORDER_MAXIDX_OFFSET];
-
-		buf_size += (max_idx + 1) * sizeof(pkt);
 
 		/* allocate space for flow reorder info */
 		brcmf_dbg(INFO, "flow-%d: start, maxidx %d\n",
 			  flow_id, max_idx);
-		rfi = kzalloc(buf_size, GFP_ATOMIC);
+		rfi = kzalloc(struct_size(rfi, pktslots, max_idx + 1),
+			      GFP_ATOMIC);
 		if (rfi == NULL) {
 			bphy_err(drvr, "failed to alloc buffer\n");
 			brcmf_netif_rx(ifp, pkt, inirq);
@@ -1844,7 +1841,6 @@ void brcmf_fws_rxreorder(struct brcmf_if *ifp, struct sk_buff *pkt, bool inirq)
 		}
 
 		ifp->drvr->reorder_flows[flow_id] = rfi;
-		rfi->pktslots = (struct sk_buff **)(rfi + 1);
 		rfi->max_idx = max_idx;
 	}
 	if (flags & BRCMF_RXREORDER_NEW_HOLE)  {
@@ -1936,7 +1932,7 @@ void brcmf_fws_rxreorder(struct brcmf_if *ifp, struct sk_buff *pkt, bool inirq)
 			rfi->cur_idx = cur_idx;
 		}
 	} else {
-		/* explicity window move updating the expected index */
+		/* explicitly window move updating the expected index */
 		exp_idx = reorder_data[BRCMF_RXREORDER_EXPIDX_OFFSET];
 
 		brcmf_dbg(DATA, "flow-%d (0x%x): change expected: %d -> %d\n",

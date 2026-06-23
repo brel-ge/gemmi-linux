@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0+
 
 /*
- * Copyright 2018-2021,2023,2025 NXP
+ * Copyright 2018-2021,2023,2025,2026 NXP
  */
 
 #include <linux/kernel.h>
@@ -255,16 +255,6 @@ static void dpu95_fu_disable_src_buf(struct dpu95_fetchunit *fu)
 	if (fu->fe)
 		fu->fe->ops.disable_src_buf(fu->fe);
 
-	if (fu->hs) {
-		dpu95_hs_pec_clken(fu->hs, CLKEN_DISABLE);
-		dpu95_hs_mode(fu->hs, SCALER_NEUTRAL);
-	}
-
-	if (fu->vs) {
-		dpu95_vs_pec_clken(fu->vs, CLKEN_DISABLE);
-		dpu95_vs_mode(fu->vs, SCALER_NEUTRAL);
-	}
-
 	if (fu->lb) {
 		dpu95_lb_pec_clken(fu->lb, CLKEN_DISABLE);
 		dpu95_lb_mode(fu->lb, LB_NEUTRAL);
@@ -315,7 +305,7 @@ dpu95_fu_set_stream_id(struct dpu95_fetchunit *fu, unsigned int stream_id)
 	struct dpu95_soc *dpu = fu->dpu;
 	int ret;
 
-	ret = regmap_update_bits(dpu->regmap, PLANE_ASSOCIATION,
+	ret = regmap_update_bits(dpu->regmap, dpu->data->plane_association,
 				 fu->association_bit,
 				 stream_id ? fu->association_bit : 0);
 	if (ret < 0)

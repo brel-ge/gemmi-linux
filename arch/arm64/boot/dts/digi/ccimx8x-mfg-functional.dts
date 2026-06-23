@@ -148,7 +148,6 @@
 
 		port {
 			ov5640_ep: endpoint {
-				remote-endpoint = <&parallel_csi_ep>;
 				bus-type = <5>; /* V4L2_FWNODE_BUS_TYPE_PARALLEL */
 				bus-width = <8>;
 				vsync-active = <0>;
@@ -200,44 +199,6 @@
 				clocks-lanes = <0>;
 			};
 		};
-	};
-};
-
-&cameradev {
-	parallel_csi;
-};
-
-&parallel_csi {
-	#address-cells = <1>;
-	#size-cells = <0>;
-	status = "okay";
-
-	port@0 {
-		reg = <0>;
-		parallel_csi_ep: endpoint {
-			remote-endpoint = <&ov5640_ep>;
-		};
-	};
-};
-
-&isi_0 {
-	interface = <6 0 2>;	/* INPUT: 6-PARALLEL CSI */
-	parallel_csi;
-	status = "okay";
-	cap_device {
-		status = "okay";
-	};
-};
-
-&isi_1 {
-	interface = <2 0 2>;	/* INPUT: 2-MIPI CSI0 */
-	status = "okay";
-	cap_device {
-		status = "okay";
-	};
-	m2m_device{
-		compatible = "imx-isi-m2m";
-		status = "okay";
 	};
 };
 
@@ -351,12 +312,6 @@
 
 /* PCIe (Wireless/Card) */
 &pcieb {
-	status = "okay";
-};
-
-/* Enable PCIe clock */
-&phyx1 {
-	fsl,refclk-pad-mode = <IMX8_PCIE_REFCLK_PAD_INPUT>;
 	status = "okay";
 };
 

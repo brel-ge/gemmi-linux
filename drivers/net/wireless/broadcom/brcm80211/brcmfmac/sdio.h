@@ -8,6 +8,7 @@
 
 #include <linux/skbuff.h>
 #include <linux/firmware.h>
+#include <linux/version.h>
 #include "firmware.h"
 
 
@@ -414,13 +415,17 @@ void brcmf_sdiod_writel(struct brcmf_sdio_dev *sdiodev, u32 addr, u32 data,
  */
 int brcmf_sdiod_send_pkt(struct brcmf_sdio_dev *sdiodev,
 			 struct sk_buff_head *pktq);
-int brcmf_sdiod_send_buf(struct brcmf_sdio_dev *sdiodev, u8 fn,
-			 u8 *buf, uint nbytes);
+int brcmf_sdiod_send_buf(struct brcmf_sdio_dev *sdiodev, u8 *buf,
+			 uint nbytes);
+int brcmf_sdiod_send_buf_fn(struct brcmf_sdio_dev *sdiodev, u8 fn,
+			    u8 *buf, uint nbytes);
 
-int brcmf_sdiod_recv_pkt(struct brcmf_sdio_dev *sdiodev, u8 fn,
+int brcmf_sdiod_recv_pkt(struct brcmf_sdio_dev *sdiodev,
 			 struct sk_buff *pkt);
-int brcmf_sdiod_recv_buf(struct brcmf_sdio_dev *sdiodev, u8 fn,
-			 u8 *buf, uint nbytes);
+int brcmf_sdiod_recv_buf(struct brcmf_sdio_dev *sdiodev, u8 *buf,
+			 uint nbytes);
+int brcmf_sdiod_recv_buf_fn(struct brcmf_sdio_dev *sdiodev, u8 fn,
+			    u8 *buf, uint nbytes);
 int brcmf_sdiod_recv_chain(struct brcmf_sdio_dev *sdiodev,
 			   struct sk_buff_head *pktq, uint totlen);
 
@@ -455,7 +460,7 @@ void brcmf_sdiod_freezer_uncount(struct brcmf_sdio_dev *sdiodev);
 int brcmf_sdiod_probe(struct brcmf_sdio_dev *sdiodev);
 int brcmf_sdiod_remove(struct brcmf_sdio_dev *sdiodev);
 
-struct brcmf_sdio *brcmf_sdio_probe(struct brcmf_sdio_dev *sdiodev);
+int brcmf_sdio_probe(struct brcmf_sdio_dev *sdiodev);
 void brcmf_sdio_remove(struct brcmf_sdio *bus);
 void brcmf_sdio_isr(struct brcmf_sdio *bus, bool in_isr);
 
@@ -463,7 +468,6 @@ void brcmf_sdio_wd_timer(struct brcmf_sdio *bus, bool active);
 void brcmf_sdio_wowl_config(struct device *dev, bool enabled);
 int brcmf_sdio_sleep(struct brcmf_sdio *bus, bool sleep);
 int brcmf_sdio_set_sdbus_clk_width(struct brcmf_sdio *bus, unsigned int flags);
-int brcmf_sdio_clkctl(struct brcmf_sdio *bus, uint target, bool pendok);
 bool brcmf_sdio_bus_sleep_state(struct brcmf_sdio *bus);
 void brcmf_sdio_trigger_dpc(struct brcmf_sdio *bus);
 u32 brcmf_sdio_get_enum_addr(struct brcmf_sdio *bus);

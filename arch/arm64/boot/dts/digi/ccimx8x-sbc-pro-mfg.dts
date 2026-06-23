@@ -229,19 +229,6 @@
 	status = "okay";
 };
 
-&isi_0 {
-	status = "okay";
-};
-
-&isi_1 {
-	status = "okay";
-};
-
-/* Parallel camera */
-&parallel_csi {
-	status = "okay";
-};
-
 &ov5640 {
 	status = "okay";
 };

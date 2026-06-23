@@ -126,20 +126,6 @@
 		};
 	};
 
-	fragment@7 {
-		target = <&cameradev>;
-		__overlay__ {
-			status = "disabled";
-		};
-	};
-
-	fragment@8 {
-		target = <&isi_0>;
-		__overlay__ {
-			status = "disabled";
-		};
-	};
-
 	fragment@9 {
 		target = <&lcdif>;
 		__overlay__ {

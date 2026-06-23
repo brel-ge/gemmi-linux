@@ -103,21 +103,8 @@
 	status = "okay";
 };
 
-/* MIPI-CSI CAMERA */
-&cameradev {
-	status = "okay";
-};
-
 &ele_fw2 {
 	memory-region = <&ele_reserved512M>;
-};
-
-&isi_0 {
-	status = "okay";
-
-	cap_device {
-		status = "okay";
-	};
 };
 
 &mipi_csi {

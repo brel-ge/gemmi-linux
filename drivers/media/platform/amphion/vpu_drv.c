@@ -138,6 +138,7 @@ static int vpu_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_vpu_media;
 	vpu->debugfs = debugfs_create_dir("amphion_vpu", NULL);
+	vpu->recorder = imx_mur_create_node(NULL, "amphion-vpu");
 
 	of_platform_populate(dev->of_node, NULL, NULL, dev);
 
@@ -151,8 +152,8 @@ err_add_decoder:
 	media_device_cleanup(&vpu->mdev);
 	v4l2_device_unregister(&vpu->v4l2_dev);
 err_vpu_deinit:
-	pm_runtime_set_suspended(dev);
 	pm_runtime_disable(dev);
+	pm_runtime_set_suspended(dev);
 
 	return ret;
 }
@@ -173,6 +174,7 @@ static void vpu_remove(struct platform_device *pdev)
 	media_device_cleanup(&vpu->mdev);
 	v4l2_device_unregister(&vpu->v4l2_dev);
 	mutex_destroy(&vpu->lock);
+	imx_mur_destroy_node(vpu->recorder);
 }
 
 static int __maybe_unused vpu_runtime_resume(struct device *dev)
@@ -227,7 +229,7 @@ MODULE_DEVICE_TABLE(of, vpu_dt_match);
 
 static struct platform_driver amphion_vpu_driver = {
 	.probe = vpu_probe,
-	.remove_new = vpu_remove,
+	.remove = vpu_remove,
 	.driver = {
 		.name = "amphion-vpu",
 		.of_match_table = vpu_dt_match,

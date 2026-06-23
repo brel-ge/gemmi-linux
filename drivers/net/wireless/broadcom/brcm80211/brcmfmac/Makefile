@@ -9,8 +9,8 @@ subdir-ccflags-y += -DBCM_TAG_STR=\"$(shell git describe --abbrev=4 --dirty --al
 subdir-ccflags-y += -DBCM_SHAID_STR=\"$(shell git rev-parse --short HEAD)\"
 
 ccflags-y += \
-	-I $(srctree)/$(src) \
-	-I $(srctree)/$(src)/../include
+	-I $(src) \
+	-I $(src)/../include
 
 obj-$(CONFIG_BRCMFMAC) += brcmfmac.o
 brcmfmac-objs += \

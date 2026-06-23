@@ -526,7 +526,7 @@ exit:
  */
 void brcmf_twt_event_timeout_handler(struct timer_list *t)
 {
-	struct brcmf_if *ifp = from_timer(ifp, t, twt_evt_timeout);
+	struct brcmf_if *ifp = timer_container_of(ifp, t, twt_evt_timeout);
 	struct brcmf_twt_session *twt_sess = NULL, *next = NULL;
 	unsigned long curr_ts = jiffies;
 	s32 ret = 0;

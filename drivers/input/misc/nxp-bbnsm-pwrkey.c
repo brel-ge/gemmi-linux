@@ -46,7 +46,7 @@ struct bbnsm_pwrkey {
 
 static void bbnsm_pwrkey_check_for_events(struct timer_list *t)
 {
-	struct bbnsm_pwrkey *bbnsm = from_timer(bbnsm, t, check_timer);
+	struct bbnsm_pwrkey *bbnsm = timer_container_of(bbnsm, t, check_timer);
 	struct input_dev *input = bbnsm->input;
 	u32 state;
 
@@ -80,6 +80,18 @@ static irqreturn_t bbnsm_pwrkey_interrupt(int irq, void *dev_id)
 		return IRQ_NONE;
 
 	pm_wakeup_event(bbnsm->input->dev.parent, 0);
+
+	/*
+	 * Directly report key event after resume to make sure key press
+	 * event is never missed.
+	 */
+	if (bbnsm->suspended) {
+		bbnsm->keystate = 1;
+		input_event(input, EV_KEY, bbnsm->keycode, 1);
+		input_sync(input);
+		/* Fire at most once per suspend/resume cycle */
+		bbnsm->suspended = false;
+	}
 
 	mod_timer(&bbnsm->check_timer,
 		   jiffies + msecs_to_jiffies(DEBOUNCE_TIME));
@@ -206,6 +218,12 @@ static int bbnsm_pwrkey_probe(struct platform_device *pdev)
 	return 0;
 }
 
+static void bbnsm_pwrkey_remove(struct platform_device *pdev)
+{
+	dev_pm_clear_wake_irq(&pdev->dev);
+	device_init_wakeup(&pdev->dev, false);
+}
+
 static int __maybe_unused bbnsm_pwrkey_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
@@ -242,6 +260,8 @@ static struct platform_driver bbnsm_pwrkey_driver = {
 		.of_match_table = bbnsm_pwrkey_ids,
 	},
 	.probe = bbnsm_pwrkey_probe,
+	.remove = bbnsm_pwrkey_remove,
+
 };
 module_platform_driver(bbnsm_pwrkey_driver);
 

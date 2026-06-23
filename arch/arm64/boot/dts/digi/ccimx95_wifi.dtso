@@ -7,7 +7,7 @@
 /plugin/;
 
 #include "../freescale/imx95-pinfunc.h"
-#include <dt-bindings/clock/fsl,imx95-clock.h>
+#include "../freescale/imx95-clock.h"
 #include <dt-bindings/gpio/gpio.h>
 
 / {

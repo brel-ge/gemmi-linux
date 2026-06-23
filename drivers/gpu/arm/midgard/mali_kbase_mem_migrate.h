@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2022-2024 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2022-2025 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -24,6 +24,7 @@
 #include <linux/version_compat_defs.h>
 
 #include <linux/types.h>
+#include <linux/migrate.h>
 
 struct kbase_device;
 struct file;
@@ -50,13 +51,27 @@ struct page;
 
 #define IS_PAGE_MOVABLE(status) ((bool)(status & PAGE_MOVABLE_MASK))
 
-/* Global integer used to determine if module parameter value has been
- * provided and if page migration feature is enabled.
+#if !defined(MALI_PAGE_MIGRATE) ||  (defined(MALI_PAGE_MIGRATE) && MALI_PAGE_MIGRATE)
+/**
+ * kbase_clear_page_movable - Clear the "movable" property from the page
+ * @p: Page to clear the "movable" property from.
+ *
+ * This function is supposed to be called just before releasing
+ * the page and will take care of removing the "movable" property
+ * from the page, if necessary.
  */
-#if !IS_ENABLED(CONFIG_PAGE_MIGRATION_SUPPORT)
-extern const int kbase_page_migration_enabled;
-#else
-extern int kbase_page_migration_enabled;
+void kbase_clear_page_movable(struct page *p);
+
+#if (KERNEL_VERSION(6, 0, 0) <= LINUX_VERSION_CODE)
+/**
+ * kbase_set_page_movable - Set the "movable" property for the page
+ * @p:   Page to set the "movable" property for.
+ * @ops: Movable operations to be set for the page.
+ *
+ * This function will set the "movable" property for the page and,
+ * if necessary, it will also set and initialize the movable operations.
+ */
+void kbase_set_page_movable(struct page *p, const struct movable_operations *ops);
 #endif
 
 /**
@@ -123,5 +138,39 @@ void kbase_mem_migrate_init(struct kbase_device *kbdev);
  * and destroy workqueue associated.
  */
 void kbase_mem_migrate_term(struct kbase_device *kbdev);
+
+#if MALI_UNIT_TEST
+/*
+ * kbase_migrate_page_allocated_mapped - Expose private function to migrate
+ *                                       allocated mapped page for testing purposes.
+ *
+ * @old_page: Existing allocated mapped page to migrate.
+ * @new_page: New page the existing page has to migrate to.
+ *
+ * Return: 0 if successful, otherwise error code.
+ */
+int kbase_migrate_page_allocated_mapped(struct page *old_page, struct page *new_page);
+#endif
+#else
+
+static inline bool kbase_alloc_page_metadata(struct kbase_device *kbdev,
+		struct page *p, dma_addr_t dma_addr, u8 group_id)
+{
+	return false;
+}
+
+static inline bool kbase_is_page_migration_enabled(void)
+{
+	return false;
+}
+
+static inline void kbase_free_page_later(struct kbase_device *kbdev, struct page *p)
+{}
+
+static inline void kbase_mem_migrate_init(struct kbase_device *kbdev)
+{}
+static inline void kbase_mem_migrate_term(struct kbase_device *kbdev)
+{}
+#endif
 
 #endif /* _KBASE_migrate_H */

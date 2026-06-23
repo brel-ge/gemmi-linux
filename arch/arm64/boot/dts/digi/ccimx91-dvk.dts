@@ -200,7 +200,7 @@
 	max98089: codec@10 {
 		compatible = "maxim,max98089";
 		reg = <0x10>;
-		clocks = <&clk IMX91_CLK_SAI3_GATE>;
+		clocks = <&clk IMX93_CLK_SAI3_GATE>;
 		clock-names = "mclk";
 	};
 
@@ -315,8 +315,8 @@
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&pinctrl_sai3>;
 	pinctrl-1 = <&pinctrl_sai3_sleep>;
-	assigned-clocks = <&clk IMX91_CLK_SAI3>;
-	assigned-clock-parents = <&clk IMX91_CLK_AUDIO_PLL>;
+	assigned-clocks = <&clk IMX93_CLK_SAI3>;
+	assigned-clock-parents = <&clk IMX93_CLK_AUDIO_PLL>;
 	assigned-clock-rates = <12288000>;
 	fsl,sai-mclk-direction-output;
 	status = "okay";

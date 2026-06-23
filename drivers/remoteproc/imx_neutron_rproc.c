@@ -78,6 +78,21 @@ struct neutron_rproc {
 	const struct			imx_rproc_dcfg *dcfg;
 };
 
+static int neutron_rproc_prepare(struct rproc *rproc)
+{
+	struct neutron_rproc *priv = rproc->priv;
+	const struct imx_rproc_dcfg *dcfg = priv->dcfg;
+	/*
+	 * After first power-on, default RESETCTRL settings restrict access,
+	 * preventing Cortex-A from accessing Neutron DTCM memory.
+	 * Configure the register here to enable Neutron memory access before
+	 * remoteproc copies ELF segments into Neutron DTCM.
+	 */
+	writel(dcfg->src_stop, priv->regbase + dcfg->src_reg);
+
+	return 0;
+}
+
 static int neutron_rproc_start(struct rproc *rproc)
 {
 	struct neutron_rproc *priv = rproc->priv;
@@ -151,6 +166,7 @@ static void *neutron_rproc_da_to_va(struct rproc *rproc, u64 da, size_t len, boo
 }
 
 static const struct rproc_ops neutron_rproc_ops = {
+	.prepare	= neutron_rproc_prepare,
 	.start		= neutron_rproc_start,
 	.stop		= neutron_rproc_stop,
 	.da_to_va	= neutron_rproc_da_to_va,
@@ -187,8 +203,6 @@ static int neutron_rproc_addr_init(struct neutron_rproc *priv,
 		priv->mem[b].size = att->size;
 		b++;
 	}
-
-	writel(dcfg->src_stop, priv->regbase + dcfg->src_reg);
 
 	return 0;
 }
@@ -262,7 +276,7 @@ err_put_rproc:
 	return ret;
 }
 
-static int neutron_rproc_remove(struct platform_device *pdev)
+static void neutron_rproc_remove(struct platform_device *pdev)
 {
 	struct rproc *rproc = platform_get_drvdata(pdev);
 
@@ -270,8 +284,6 @@ static int neutron_rproc_remove(struct platform_device *pdev)
 
 	rproc_del(rproc);
 	rproc_free(rproc);
-
-	return 0;
 }
 
 static const struct of_device_id neutron_rproc_of_match[] = {

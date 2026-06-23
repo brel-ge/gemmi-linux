@@ -11,7 +11,7 @@
 #include "imx8-isi-core.h"
 #include "imx8-isi-regs.h"
 
-#define	ISI_DOWNSCALE_THRESHOLD		0x4000
+#define	ISI_DOWNSCALE_THRESHOLD		0x2000
 
 static inline u32 mxc_isi_read(struct mxc_isi_pipe *pipe, u32 reg)
 {
@@ -81,15 +81,15 @@ void mxc_isi_channel_set_outbuf(struct mxc_isi_pipe *pipe,
 }
 
 void mxc_isi_channel_set_max_size(struct mxc_isi_pipe *pipe,
-				  const struct vb2_v4l2_buffer *v4l2_buf,
+				  const struct v4l2_pix_format_mplane *pix,
 				  const bool buf_max_size)
 {
 	if (!buf_max_size)
 		return;
 
-	mxc_isi_write(pipe, CHNL_OUT_BUF_MAX_SIZE_Y, v4l2_buf->planes[0].length);
-	mxc_isi_write(pipe, CHNL_OUT_BUF_MAX_SIZE_U, v4l2_buf->planes[1].length);
-	mxc_isi_write(pipe, CHNL_OUT_BUF_MAX_SIZE_V, v4l2_buf->planes[2].length);
+	mxc_isi_write(pipe, CHNL_OUT_BUF_MAX_SIZE_Y, pix->plane_fmt[0].sizeimage);
+	mxc_isi_write(pipe, CHNL_OUT_BUF_MAX_SIZE_U, pix->plane_fmt[1].sizeimage);
+	mxc_isi_write(pipe, CHNL_OUT_BUF_MAX_SIZE_V, pix->plane_fmt[2].sizeimage);
 }
 
 void mxc_isi_channel_m2m_start(struct mxc_isi_pipe *pipe)
@@ -233,8 +233,7 @@ static void mxc_isi_channel_set_csc(struct mxc_isi_pipe *pipe,
 		[MXC_ISI_ENC_RGB] = "RGB",
 		[MXC_ISI_ENC_YUV] = "YUV",
 	};
-	const u32 *coeffs;
-	bool cscen = true;
+	const u32 *coeffs = NULL;
 	u32 val;
 
 	val = mxc_isi_read(pipe, CHNL_IMG_CTRL);
@@ -253,14 +252,13 @@ static void mxc_isi_channel_set_csc(struct mxc_isi_pipe *pipe,
 		val |= CHNL_IMG_CTRL_CSC_MODE(CHNL_IMG_CTRL_CSC_MODE_RGB2YCBCR);
 	} else {
 		/* Bypass CSC */
-		cscen = false;
 		val |= CHNL_IMG_CTRL_CSC_BYPASS;
 	}
 
 	dev_dbg(pipe->isi->dev, "CSC: %s -> %s\n",
 		encodings[in_encoding], encodings[out_encoding]);
 
-	if (cscen) {
+	if (coeffs) {
 		mxc_isi_write(pipe, CHNL_CSC_COEFF0, coeffs[0]);
 		mxc_isi_write(pipe, CHNL_CSC_COEFF1, coeffs[1]);
 		mxc_isi_write(pipe, CHNL_CSC_COEFF2, coeffs[2]);
@@ -271,7 +269,7 @@ static void mxc_isi_channel_set_csc(struct mxc_isi_pipe *pipe,
 
 	mxc_isi_write(pipe, CHNL_IMG_CTRL, val);
 
-	*bypass = !cscen;
+	*bypass = !coeffs;
 }
 
 void mxc_isi_channel_set_alpha(struct mxc_isi_pipe *pipe, u8 alpha)
@@ -323,14 +321,15 @@ static void mxc_isi_channel_set_control(struct mxc_isi_pipe *pipe,
 					enum mxc_isi_input_id input,
 					bool bypass)
 {
+	const struct mxc_isi_plat_data *pdata = pipe->isi->pdata;
 	u32 val;
 
 	mutex_lock(&pipe->lock);
 
 	val = mxc_isi_read(pipe, CHNL_CTRL);
 	val &= ~(CHNL_CTRL_CHNL_BYPASS | CHNL_CTRL_CHAIN_BUF_MASK |
-		 CHNL_CTRL_BLANK_PXL_MASK | CHNL_CTRL_SRC_TYPE_MASK |
-		 CHNL_CTRL_MIPI_VC_ID_MASK | CHNL_CTRL_SRC_INPUT_MASK);
+		 CHNL_CTRL_SRC_TYPE_MASK | CHNL_CTRL_MIPI_VC_ID_MASK |
+		 CHNL_CTRL_SRC_INPUT_MASK);
 
 	/*
 	 * If no scaling or color space conversion is needed, bypass the
@@ -361,6 +360,19 @@ static void mxc_isi_channel_set_control(struct mxc_isi_pipe *pipe,
 		val |= CHNL_CTRL_MIPI_VC_ID(pipe->vc & 0x3);
 		val |= CHNL_CTRL_VC_ID_1((pipe->vc >> 2) & 0x1);
 	}
+
+	/*
+	 * Enable RAW10/12/14 output LSB alignment by default since the
+	 * default value is either 1 or reserved as zero in previous ISI.
+	 */
+	val |= CHNL_CTRL_RAW_OUT_LSB_ALIGN;
+
+	/*
+	 * Aligns the data selection from the pixel link(PL) to MSB to
+	 * avoid data shift issue since the data from PL is MSB.
+	 */
+	if (pdata->raw_out_lsb)
+		val |= CHNL_CTRL_RAW_IN_MSB_ALIGN;
 
 	mxc_isi_write(pipe, CHNL_CTRL, val);
 
@@ -414,10 +426,19 @@ void mxc_isi_channel_set_input_format(struct mxc_isi_pipe *pipe,
 		      CHNL_IN_BUF_PITCH_LINE_PITCH(bpl));
 }
 
+static bool isi_out_raw(u32 format)
+{
+	return format == CHNL_IMG_CTRL_FORMAT_RAW10 ||
+	       format == CHNL_IMG_CTRL_FORMAT_RAW12 ||
+	       format == CHNL_IMG_CTRL_FORMAT_RAW14;
+}
+
 void mxc_isi_channel_set_output_format(struct mxc_isi_pipe *pipe,
 				       const struct mxc_isi_format_info *info,
 				       struct v4l2_pix_format_mplane *format)
 {
+	const struct mxc_isi_plat_data *pdata = pipe->isi->pdata;
+	u32 fmt;
 	u32 val;
 
 	/* set outbuf format */
@@ -425,7 +446,21 @@ void mxc_isi_channel_set_output_format(struct mxc_isi_pipe *pipe,
 
 	val = mxc_isi_read(pipe, CHNL_IMG_CTRL);
 	val &= ~CHNL_IMG_CTRL_FORMAT_MASK;
-	val |= CHNL_IMG_CTRL_FORMAT(info->isi_out_format);
+
+	/*
+	 * Before i.MX952, the ISI shifts the 10/12/14-bit formats left
+	 * by 6, 4 and 2 bits when using CHNL_IMG_CTRL_FORMAT_RAW10/12/14
+	 * respectively, to align the bits to the left and pad with zeros in
+	 * the LSBs. The corresponding V4L2 formats are however right-aligned,
+	 * we have to use CHNL_IMG_CTRL_FORMAT_RAW16 to avoid the left shift.
+	 * After i.MX952, ISI add RAW10/12/14 LSB output alignment, so skip
+	 * the above workaround.
+	 */
+	fmt = !pdata->raw_out_lsb && isi_out_raw(info->isi_out_format) ?
+	      CHNL_IMG_CTRL_FORMAT_RAW16 :
+	      info->isi_out_format;
+
+	val |= CHNL_IMG_CTRL_FORMAT(fmt);
 	mxc_isi_write(pipe, CHNL_IMG_CTRL, val);
 
 	/* line pitch */
@@ -610,7 +645,7 @@ void mxc_isi_channel_release(struct mxc_isi_pipe *pipe)
  *
  * TODO: Support secondary line buffer for downscaling YUV420 images.
  */
-int mxc_isi_channel_chain(struct mxc_isi_pipe *pipe, bool bypass)
+int mxc_isi_channel_chain(struct mxc_isi_pipe *pipe)
 {
 	/* Channel chaining requires both line and output buffer. */
 	const u8 resources = MXC_ISI_CHANNEL_RES_OUTPUT_BUF

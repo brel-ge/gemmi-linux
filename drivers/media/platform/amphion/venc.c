@@ -13,14 +13,12 @@
 #include <linux/videodev2.h>
 #include <linux/ktime.h>
 #include <linux/rational.h>
-#include <linux/vmalloc.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-mem2mem.h>
 #include <media/v4l2-ioctl.h>
 #include <media/videobuf2-v4l2.h>
 #include <media/videobuf2-dma-contig.h>
-#include <media/videobuf2-vmalloc.h>
 #include "vpu.h"
 #include "vpu_defs.h"
 #include "vpu_core.h"
@@ -52,7 +50,7 @@ struct venc_t {
 	u32 ready_count;
 	u32 enable;
 	u32 stopped;
-	bool memory_resource_configured;
+	u32 memory_resource_configured;
 
 	u32 skipped_count;
 	u32 skipped_bytes;
@@ -682,6 +680,8 @@ static int venc_ctrl_init(struct vpu_inst *inst)
 	v4l2_ctrl_new_std(&inst->ctrl_handler, NULL,
 			  V4L2_CID_MPEG_VIDEO_AVERAGE_QP, 0, 51, 1, 0);
 
+	imx_mur_new_v4l2_ctrl(&inst->ctrl_handler, inst->recorder);
+
 	if (inst->ctrl_handler.error) {
 		ret = inst->ctrl_handler.error;
 		v4l2_ctrl_handler_free(&inst->ctrl_handler);
@@ -846,7 +846,7 @@ static int venc_get_encoded_frames(struct vpu_inst *inst)
 					       v4l2_m2m_dst_buf_remove(inst->fh.m2m_ctx)))
 			break;
 		list_del_init(&frame->list);
-		vfree(frame);
+		kfree(frame);
 	}
 
 	return 0;
@@ -862,7 +862,7 @@ static int venc_frame_encoded(struct vpu_inst *inst, void *arg)
 	if (!info)
 		return -EINVAL;
 	venc = inst->priv;
-	frame = vzalloc(sizeof(*frame));
+	frame = kzalloc(sizeof(*frame), GFP_KERNEL);
 	if (!frame)
 		return -ENOMEM;
 
@@ -914,9 +914,9 @@ static void venc_cleanup(struct vpu_inst *inst)
 		return;
 
 	venc = inst->priv;
-	vfree(venc);
+	kfree(venc);
 	inst->priv = NULL;
-	vfree(inst);
+	kfree(inst);
 }
 
 static int venc_start_session(struct vpu_inst *inst, u32 type)
@@ -933,6 +933,8 @@ static int venc_start_session(struct vpu_inst *inst, u32 type)
 	stream_buffer_size = vpu_iface_get_stream_buffer_size(inst->core);
 	if (stream_buffer_size > 0) {
 		inst->stream_buffer.length = max_t(u32, stream_buffer_size, venc->cpb_size * 3);
+		inst->stream_buffer.recorder = inst->recorder;
+		inst->stream_buffer.label = "ring-buf";
 		ret = vpu_alloc_dma(inst->core, &inst->stream_buffer);
 		if (ret)
 			goto error;
@@ -1031,6 +1033,8 @@ static void venc_request_mem_resource(struct vpu_inst *inst,
 
 	for (i = 0; i < enc_frame_num; i++) {
 		venc->enc[i].length = enc_frame_size;
+		venc->enc[i].recorder = inst->recorder;
+		venc->enc[i].label = "enc";
 		ret = vpu_alloc_dma(inst->core, &venc->enc[i]);
 		if (ret) {
 			venc_cleanup_mem_resource(inst);
@@ -1039,6 +1043,8 @@ static void venc_request_mem_resource(struct vpu_inst *inst,
 	}
 	for (i = 0; i < ref_frame_num; i++) {
 		venc->ref[i].length = ref_frame_size;
+		venc->ref[i].recorder = inst->recorder;
+		venc->ref[i].label = "ref";
 		ret = vpu_alloc_dma(inst->core, &venc->ref[i]);
 		if (ret) {
 			venc_cleanup_mem_resource(inst);
@@ -1069,7 +1075,7 @@ static void venc_cleanup_frames(struct venc_t *venc)
 
 	list_for_each_entry_safe(frame, tmp, &venc->frames, list) {
 		list_del_init(&frame->list);
-		vfree(frame);
+		kfree(frame);
 	}
 }
 
@@ -1153,7 +1159,7 @@ static int venc_process_capture(struct vpu_inst *inst, struct vb2_buffer *vb)
 		return ret;
 
 	list_del_init(&frame->list);
-	vfree(frame);
+	kfree(frame);
 	return 0;
 }
 
@@ -1311,13 +1317,13 @@ static int venc_open(struct file *file)
 	struct venc_t *venc;
 	int ret;
 
-	inst = vzalloc(sizeof(*inst));
+	inst = kzalloc(sizeof(*inst), GFP_KERNEL);
 	if (!inst)
 		return -ENOMEM;
 
-	venc = vzalloc(sizeof(*venc));
+	venc = kzalloc(sizeof(*venc), GFP_KERNEL);
 	if (!venc) {
-		vfree(inst);
+		kfree(inst);
 		return -ENOMEM;
 	}
 

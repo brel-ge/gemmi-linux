@@ -7,6 +7,7 @@
 
 #include <dt-bindings/phy/phy-imx8-pcie.h>
 #include <dt-bindings/pwm/pwm.h>
+#include <dt-bindings/net/nxp-netc.h>
 #include <dt-bindings/usb/pd.h>
 /* i.MX95 CPU */
 #include "../freescale/imx95.dtsi"
@@ -481,7 +482,7 @@
 	};
 };
 
-&netc_prb_ierb {
+&netc_blk_ctrl {
 	netc-interfaces = <NXP_NETC_RGMII
 			   NXP_NETC_RGMII
 			   NXP_NETC_SERIAL>;

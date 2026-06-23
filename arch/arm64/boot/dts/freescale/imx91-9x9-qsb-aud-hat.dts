@@ -87,6 +87,16 @@
 		};
 	};
 
+	exp_sel_switch: regulator-sel-switch {
+		compatible = "regulator-fixed";
+		regulator-name = "exp-sel-switch";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&pcal6524 22 GPIO_ACTIVE_HIGH>;
+		enable-active-low;
+		regulator-always-on;
+	};
+
 	reg_audio_pwr: regulator-audio-pwr {
 		compatible = "regulator-fixed";
 		pinctrl-names = "default";
@@ -118,6 +128,14 @@
 		};
 	};
 
+	sound-micfil {
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_swpdm_mute_irq>;
+	};
+};
+
+&dmic {
+	num-channels = <8>;
 };
 
 &reg_exp_3v3 {
@@ -142,12 +160,12 @@
 	#sound-dai-cells = <0>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_sai3audhat>;
-	clocks = <&clk IMX91_CLK_SAI3_IPG>, <&clk IMX91_CLK_DUMMY>,
-		 <&clk IMX91_CLK_SAI3_GATE>, <&clk IMX91_CLK_DUMMY>,
-		 <&clk IMX91_CLK_DUMMY>, <&clk IMX91_CLK_AUDIO_PLL>;
+	clocks = <&clk IMX93_CLK_SAI3_IPG>, <&clk IMX93_CLK_DUMMY>,
+		 <&clk IMX93_CLK_SAI3_GATE>, <&clk IMX93_CLK_DUMMY>,
+		 <&clk IMX93_CLK_DUMMY>, <&clk IMX93_CLK_AUDIO_PLL>;
 	clock-names = "bus", "mclk0", "mclk1", "mclk2", "mclk3", "pll8k";
-	assigned-clocks = <&clk IMX91_CLK_SAI3>;
-	assigned-clock-parents = <&clk IMX91_CLK_AUDIO_PLL>;
+	assigned-clocks = <&clk IMX93_CLK_SAI3>;
+	assigned-clock-parents = <&clk IMX93_CLK_AUDIO_PLL>;
 	assigned-clock-rates = <12288000>;
 	fsl,sai-mclk-direction-output;
 	fsl,sai-asynchronous;
@@ -161,14 +179,11 @@
 };
 
 &lpi2c4 {
-	#address-cells = <1>;
-	#size-cells = <0>;
 	clock-frequency = <400000>;
 	dmas = <&edma2 10 0 0>, <&edma2 11 0 1>;
 	dma-names = "tx","rx";
-	pinctrl-names = "default", "sleep";
+	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_lpi2c4>;
-	pinctrl-1 = <&pinctrl_lpi2c4>;
 	status = "okay";
 
 	pca9555: gpio@21 {
@@ -188,12 +203,12 @@
 		#sound-dai-cells = <0>;
 		compatible = "cirrus,cs42448";
 		reg = <0x48>;
-		clocks = <&clk IMX91_CLK_SAI3_GATE>;
+		clocks = <&clk IMX93_CLK_SAI3_GATE>;
 		clock-names = "mclk";
 		VA-supply = <&reg_exp_3v3>;
 		VD-supply = <&reg_exp_5v>;
 		VLS-supply = <&reg_audio_pwr>;
-		VLC-supply = <&reg_audio_pwr>;
+		VLC-supply = <&exp_sel_switch>;
 		reset-gpio = <&pcal6524 6 GPIO_ACTIVE_LOW>;
 		status = "okay";
 	};
@@ -225,13 +240,13 @@
 
 	pinctrl_sai3audhat: sai3audhat {
 		fsl,pins = <
-			MX91_PAD_GPIO_IO17__SAI3_MCLK		0x3fe
-			MX91_PAD_GPIO_IO19__SAI3_RX_SYNC	0x3fe
-			MX91_PAD_GPIO_IO18__SAI3_RX_BCLK	0x3fe
-			MX91_PAD_UART2_TXD__SAI3_TX_SYNC	0x3fe
-			MX91_PAD_GPIO_IO16__SAI3_TX_BCLK	0x3fe
-			MX91_PAD_GPIO_IO21__SAI3_TX_DATA0	0x3fe
-			MX91_PAD_GPIO_IO20__SAI3_RX_DATA0	0x3fe
+			MX91_PAD_GPIO_IO17__SAI3_MCLK		0x39e
+			MX91_PAD_GPIO_IO19__SAI3_RX_SYNC	0x39e
+			MX91_PAD_GPIO_IO18__SAI3_RX_BCLK	0x39e
+			MX91_PAD_UART2_TXD__SAI3_TX_SYNC	0x39e
+			MX91_PAD_GPIO_IO16__SAI3_TX_BCLK	0x39e
+			MX91_PAD_GPIO_IO21__SAI3_TX_DATA0	0x39e
+			MX91_PAD_GPIO_IO20__SAI3_RX_DATA0	0x39e
 		>;
 	};
 

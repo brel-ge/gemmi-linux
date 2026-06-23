@@ -112,7 +112,7 @@ struct pfuze_chip {
 	struct pfuze_regulator regulator_descs[PFUZE100_MAX_REGULATOR];
 	struct regulator_dev *regulators[PFUZE100_MAX_REGULATOR];
 	struct bin_attribute *nvram;
-	struct pfuze_regulator *pfuze_regulators;
+	const struct pfuze_regulator *pfuze_regulators;
 };
 
 static const int pfuze100_swbst[] = {
@@ -659,6 +659,24 @@ static struct regulator_ops pfuze3000_swbust_regulator_ops = {
 	.mode_mask = mmask,						\
 }
 
+#define PFUZE3000_SWBUST_REG(_chip, _name, base, mask, voltages, mon,	\
+			     msusp, mmask) {				\
+	.desc = {							\
+		.name = #_name,						\
+		.n_voltages = ARRAY_SIZE(voltages),			\
+		.ops = &pfuze3000_swbust_regulator_ops,			\
+		.type = REGULATOR_VOLTAGE,				\
+		.id = _chip ## _ ## _name,				\
+		.owner = THIS_MODULE,					\
+		.volt_table = voltages,					\
+		.vsel_reg = (base),					\
+		.vsel_mask = (mask),					\
+	},								\
+	.mode_on = mon,							\
+	.mode_susp = msusp,						\
+	.mode_mask = mmask,						\
+}
+
 #define PFUZE3000_SW2_REG(_chip, _name, base, min, max, step)	{	\
 	.desc = {	\
 		.name = #_name,\
@@ -693,26 +711,8 @@ static struct regulator_ops pfuze3000_swbust_regulator_ops = {
 	.stby_mask = 0xf,	\
 }
 
-#define PFUZE3000_SWBUST_REG(_chip, _name, base, mask, voltages, mon,	\
-			     msusp, mmask) {				\
-	.desc = {							\
-		.name = #_name,						\
-		.n_voltages = ARRAY_SIZE(voltages),			\
-		.ops = &pfuze3000_swbust_regulator_ops,			\
-		.type = REGULATOR_VOLTAGE,				\
-		.id = _chip ## _ ## _name,				\
-		.owner = THIS_MODULE,					\
-		.volt_table = voltages,					\
-		.vsel_reg = (base),					\
-		.vsel_mask = (mask),					\
-	},								\
-	.mode_on = mon,							\
-	.mode_susp = msusp,						\
-	.mode_mask = mmask,						\
-}
-
 /* PFUZE100 */
-static struct pfuze_regulator pfuze100_regulators[] = {
+static const struct pfuze_regulator pfuze100_regulators[] = {
 	PFUZE100_SW_REG(PFUZE100, SW1AB, PFUZE100_SW1ABVOL, 300000, 1875000, 25000),
 	PFUZE100_SW_REG(PFUZE100, SW1C, PFUZE100_SW1CVOL, 300000, 1875000, 25000),
 	PFUZE100_SW_REG(PFUZE100, SW2, PFUZE100_SW2VOL, 400000, 1975000, 25000),
@@ -731,7 +731,7 @@ static struct pfuze_regulator pfuze100_regulators[] = {
 	PFUZE100_COIN_REG(PFUZE100, COIN, PFUZE100_COINVOL, 0x7, pfuze100_coin),
 };
 
-static struct pfuze_regulator pfuze200_regulators[] = {
+static const struct pfuze_regulator pfuze200_regulators[] = {
 	PFUZE100_SW_REG(PFUZE200, SW1AB, PFUZE100_SW1ABVOL, 300000, 1875000, 25000),
 	PFUZE100_SW_REG(PFUZE200, SW2, PFUZE100_SW2VOL, 400000, 1975000, 25000),
 	PFUZE100_SW_REG(PFUZE200, SW3A, PFUZE100_SW3AVOL, 400000, 1975000, 25000),
@@ -748,16 +748,20 @@ static struct pfuze_regulator pfuze200_regulators[] = {
 	PFUZE100_COIN_REG(PFUZE200, COIN, PFUZE100_COINVOL, 0x7, pfuze100_coin),
 };
 
-static struct pfuze_regulator pfuze3000_regulators[] = {
+static const struct pfuze_regulator pfuze3000_regulators[] = {
 	PFUZE3000_SW_REG(PFUZE3000, SW1A, PFUZE100_SW1ABVOL, 0x1f, pfuze3000_sw1a,
-			 PFUZE_BUCK_MODE_APS, PFUZE_BUCK_MODE_PFM, PFUZE_BUCK_REG_MODE_MASK),
+			 PFUZE_BUCK_MODE_APS, PFUZE_BUCK_MODE_PFM,
+			 PFUZE_BUCK_REG_MODE_MASK),
 	PFUZE3000_SW_REG(PFUZE3000, SW1B, PFUZE100_SW1CVOL, 0x1f, pfuze3000_sw1b,
-			 PFUZE_BUCK_MODE_APS, PFUZE_BUCK_MODE_PFM, PFUZE_BUCK_REG_MODE_MASK),
+			 PFUZE_BUCK_MODE_APS, PFUZE_BUCK_MODE_PFM,
+			 PFUZE_BUCK_REG_MODE_MASK),
 	PFUZE3000_SW_REG(PFUZE3000, SW2, PFUZE100_SW2VOL, 0x7, pfuze3000_sw2lo,
-			 PFUZE_BUCK_MODE_APS, PFUZE_BUCK_MODE_PFM, PFUZE_BUCK_REG_MODE_MASK),
+			 PFUZE_BUCK_MODE_APS, PFUZE_BUCK_MODE_PFM,
+			 PFUZE_BUCK_REG_MODE_MASK),
 	PFUZE3000_SW3_REG(PFUZE3000, SW3, PFUZE100_SW3AVOL, 900000, 1650000, 50000),
-	PFUZE3000_SWBUST_REG(PFUZE3000, SWBST, PFUZE100_SWBSTCON1, 0x3, pfuze100_swbst,
-			     PFUZE_BUST_REG_MODE_APS, PFUZE_BUST_REG_MODE_PFM,
+	PFUZE3000_SWBUST_REG(PFUZE3000, SWBST, PFUZE100_SWBSTCON1, 0x3,
+			     pfuze100_swbst, PFUZE_BUST_REG_MODE_APS,
+			     PFUZE_BUST_REG_MODE_PFM,
 			     PFUZE_BUST_REG_MODE_MASK),
 	PFUZE100_FIXED_REG(PFUZE3000, VSNVS, PFUZE100_VSNVSVOL, 0x6, 3000000),
 	PFUZE100_FIXED_REG(PFUZE3000, VREFDDR, PFUZE100_VREFDDRCON, 0x1, 750000),
@@ -770,11 +774,13 @@ static struct pfuze_regulator pfuze3000_regulators[] = {
 	PFUZE100_COIN_REG(PFUZE3000, VCOIN, PFUZE100_COINVOL, 0x7, pfuze100_coin),
 };
 
-static struct pfuze_regulator pfuze3001_regulators[] = {
+static const struct pfuze_regulator pfuze3001_regulators[] = {
 	PFUZE3000_SW_REG(PFUZE3001, SW1, PFUZE100_SW1ABVOL, 0x1f, pfuze3000_sw1a,
-			 PFUZE_BUCK_MODE_APS, PFUZE_BUCK_MODE_PFM, PFUZE_BUCK_REG_MODE_MASK),
+			 PFUZE_BUCK_MODE_APS, PFUZE_BUCK_MODE_PFM,
+			 PFUZE_BUCK_REG_MODE_MASK),
 	PFUZE3000_SW_REG(PFUZE3001, SW2, PFUZE100_SW2VOL, 0x7, pfuze3000_sw2lo,
-			 PFUZE_BUCK_MODE_APS, PFUZE_BUCK_MODE_PFM, PFUZE_BUCK_REG_MODE_MASK),
+			 PFUZE_BUCK_MODE_APS, PFUZE_BUCK_MODE_PFM,
+			 PFUZE_BUCK_REG_MODE_MASK),
 	PFUZE3000_SW3_REG(PFUZE3001, SW3, PFUZE100_SW3AVOL, 900000, 1650000, 50000),
 	PFUZE100_SWB_REG(PFUZE3001, VSNVS, PFUZE100_VSNVSVOL, 0x7, pfuze100_vsnvs),
 	PFUZE100_VGEN_REG(PFUZE3001, VLDO1, PFUZE100_VGEN1VOL, 1800000, 3300000, 100000),
@@ -992,7 +998,7 @@ static int pfuze_power_off_prepare_init(struct pfuze_chip *pfuze_chip)
 }
 
 static ssize_t pfuze3000_nvram_read(struct file *filp, struct kobject *kobj,
-				    struct bin_attribute *attr,
+				    const struct bin_attribute *attr,
 				    char *buf, loff_t off, size_t count)
 {
 	struct i2c_client *client;
@@ -1018,8 +1024,8 @@ static ssize_t pfuze3000_nvram_read(struct file *filp, struct kobject *kobj,
 }
 
 static ssize_t pfuze3000_nvram_write(struct file *filp, struct kobject *kobj,
-		struct bin_attribute *attr,
-		char *buf, loff_t off, size_t count)
+				     const struct bin_attribute *attr,
+				     char *buf, loff_t off, size_t count)
 {
 	struct i2c_client *client;
 	struct pfuze_chip *pfuze;
@@ -1088,7 +1094,7 @@ static const struct regmap_config pfuze_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = PFUZE_NUMREGS - 1,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 };
 
 static int pfuze100_regulator_probe(struct i2c_client *client)

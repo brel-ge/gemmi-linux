@@ -82,6 +82,12 @@ static int neutron_pdev_probe(struct platform_device *pdev)
 		goto err_free_dev;
 	}
 
+	ndev->num_clks = devm_clk_bulk_get_all(&pdev->dev, &ndev->clks);
+	if (ndev->num_clks < 0) {
+		dev_err(&pdev->dev, "unable to get clocks: %d\n", ndev->num_clks);
+		goto err_free_dev;
+	}
+
 	ndev->power_mode = power_mode;
 	ndev->suspend_delay = suspend_delay;
 
@@ -134,7 +140,7 @@ err_free_dev:
 	return ret;
 }
 
-static int neutron_pdev_remove(struct platform_device *pdev)
+static void neutron_pdev_remove(struct platform_device *pdev)
 {
 	struct neutron_device *ndev = platform_get_drvdata(pdev);
 
@@ -146,8 +152,6 @@ static int neutron_pdev_remove(struct platform_device *pdev)
 	neutron_dev_deinit(ndev);
 	pm_runtime_put_noidle(ndev->dev);
 	pm_runtime_disable(ndev->dev);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -276,3 +280,4 @@ module_exit(neutron_exit)
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("i.MX Neutron NPU Driver");
 MODULE_VERSION(NEUTRON_DRIVER_VERSION);
+MODULE_IMPORT_NS("DMA_BUF");

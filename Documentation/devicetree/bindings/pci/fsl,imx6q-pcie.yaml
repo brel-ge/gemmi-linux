@@ -29,19 +29,8 @@ properties:
       - fsl,imx8mq-pcie
       - fsl,imx8mm-pcie
       - fsl,imx8mp-pcie
-      - fsl,imx8qm-pcie
-      - fsl,imx8qxp-pcie
       - fsl,imx95-pcie
-
-  reg:
-    items:
-      - description: Data Bus Interface (DBI) registers.
-      - description: PCIe configuration space region.
-
-  reg-names:
-    items:
-      - const: dbi
-      - const: config
+      - fsl,imx8q-pcie
 
   clocks:
     minItems: 3
@@ -58,12 +47,24 @@ properties:
     maxItems: 5
 
   interrupts:
+    minItems: 1
     items:
       - description: builtin MSI controller.
+      - description: builtin DMA controller.
+      - description: builtin AER SPI standalone interrupter line.
+      - description: Application-specific IRQ raised depending on the
+          vendor-specific events basis.
+      - description: builtin PME SPI standalone interrupter line.
+
 
   interrupt-names:
+    minItems: 1
     items:
       - const: msi
+      - const: dma
+      - const: aer
+      - const: intr
+      - const: pme
 
   reset-gpio:
     description: Should specify the GPIO for controlling the PCI bus device
@@ -105,11 +106,48 @@ allOf:
       properties:
         compatible:
           enum:
+            - fsl,imx6q-pcie
+            - fsl,imx6sx-pcie
+            - fsl,imx6qp-pcie
+            - fsl,imx7d-pcie
+            - fsl,imx8mq-pcie
+            - fsl,imx8mm-pcie
+            - fsl,imx8mp-pcie
+    then:
+      properties:
+        reg:
+          maxItems: 2
+        reg-names:
+          items:
+            - const: dbi
+            - const: config
+
+  - if:
+      properties:
+        compatible:
+          enum:
+            - fsl,imx95-pcie
+    then:
+      properties:
+        reg:
+          minItems: 4
+          maxItems: 4
+        reg-names:
+          items:
+            - const: dbi
+            - const: config
+            - const: atu
+            - const: app
+
+  - if:
+      properties:
+        compatible:
+          enum:
             - fsl,imx6sx-pcie
     then:
       properties:
         clocks:
-          minItems: 4
+          maxItems: 4
         clock-names:
           items:
             - const: pcie
@@ -125,7 +163,7 @@ allOf:
     then:
       properties:
         clocks:
-          minItems: 4
+          maxItems: 4
         clock-names:
           items:
             - const: pcie
@@ -170,6 +208,21 @@ allOf:
       properties:
         compatible:
           enum:
+            - fsl,imx8q-pcie
+    then:
+      properties:
+        clocks:
+          maxItems: 3
+        clock-names:
+          items:
+            - const: dbi
+            - const: mstr
+            - const: slv
+
+  - if:
+      properties:
+        compatible:
+          enum:
             - fsl,imx95-pcie
     then:
       properties:
@@ -181,7 +234,11 @@ allOf:
             - const: pcie_bus
             - const: pcie_phy
             - const: pcie_aux
-            - const: ref
+            - description: PCIe reference clock.
+              oneOf:
+              - description: The controller might be configured clocking coming
+                  in from an internal system PLL or external clock source.
+              enum: [ref, ext-ref]
 
 unevaluatedProperties: false
 

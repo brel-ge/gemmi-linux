@@ -7,6 +7,7 @@
 
 #include <dt-bindings/usb/pd.h>
 #include "imx8mp.dtsi"
+#include "imx8mp-nxp-display.dtsi"
 
 / {
 	model = "NXP i.MX8MP SOM on AB2";
@@ -32,13 +33,6 @@
 		device_type = "memory";
 		reg = <0x0 0x40000000 0 0xc0000000>,
 		      <0x1 0x00000000 0 0xc0000000>;
-	};
-
-	ak4458_reset: gpio-reset {
-		compatible = "gpio-reset";
-		reset-gpios = <&pca6416 4 GPIO_ACTIVE_LOW>;
-		#reset-cells = <0>;
-		initially-in-reset;
 	};
 
 	reg_usdhc2_vmmc: regulator-usdhc2 {
@@ -173,7 +167,6 @@
 &ecspi2 {
 	#address-cells = <1>;
 	#size-cells = <0>;
-	fsl,spi-num-chipselects = <1>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_ecspi2 &pinctrl_ecspi2_cs>;
 	cs-gpios = <&gpio5 13 GPIO_ACTIVE_LOW>;
@@ -362,7 +355,7 @@
 		sound-name-prefix = "0";
 		compatible = "asahi-kasei,ak4458";
 		reg = <0x10>;
-		resets = <&ak4458_reset>;
+		reset-gpios = <&pca6416 4 GPIO_ACTIVE_LOW>;
 		AVDD-supply = <&reg_ab2_ana_pwr>;
 		DVDD-supply = <&reg_ab2_ana_pwr>;
 	};
@@ -372,7 +365,7 @@
 		sound-name-prefix = "1";
 		compatible = "asahi-kasei,ak4458";
 		reg = <0x11>;
-		resets = <&ak4458_reset>;
+		reset-gpios = <&pca6416 4 GPIO_ACTIVE_LOW>;
 		AVDD-supply = <&reg_ab2_ana_pwr>;
 		DVDD-supply = <&reg_ab2_ana_pwr>;
 	};
@@ -381,7 +374,7 @@
 		#sound-dai-cells = <0>;
 		compatible = "asahi-kasei,ak4458";
 		reg = <0x12>;
-		resets = <&ak4458_reset>;
+		reset-gpios = <&pca6416 4 GPIO_ACTIVE_LOW>;
 		AVDD-supply = <&reg_ab2_ana_pwr>;
 		DVDD-supply = <&reg_ab2_ana_pwr>;
 	};
@@ -879,32 +872,4 @@
 			MX8MP_IOMUXC_GPIO1_IO02__WDOG1_WDOG_B	0xc6
 		>;
 	};
-};
-
-&vpu_g1 {
-	status = "okay";
-};
-
-&vpu_g2 {
-	status = "okay";
-};
-
-&vpu_vc8000e {
-	status = "okay";
-};
-
-&gpu_3d {
-	status = "okay";
-};
-
-&gpu_2d {
-	status = "okay";
-};
-
-&ml_vipsi {
-	status = "okay";
-};
-
-&mix_gpu_ml {
-	status = "okay";
 };

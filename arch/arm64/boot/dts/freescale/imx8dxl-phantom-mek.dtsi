@@ -17,17 +17,6 @@
 		stdout-path = &lpuart0;
 	};
 
-	modem_reset: modem-reset {
-		compatible = "gpio-reset";
-		pinctrl-names = "default", "sleep";
-		pinctrl-0 = <&pinctrl_modem_reset>;
-		pinctrl-1 = <&pinctrl_modem_reset_sleep>;
-		reset-gpios = <&lsio_gpio3 1 GPIO_ACTIVE_LOW>;
-		reset-delay-us = <2000>;
-		reset-post-delay-ms = <40>;
-		#reset-cells = <0>;
-	};
-
 	reserved-memory {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -285,18 +274,6 @@
 			>;
 		};
 
-		pinctrl_modem_reset: modemresetgrp {
-			fsl,pins = <
-				IMX8QXP_CSI_MCLK_LSIO_GPIO3_IO01	0x06000021
-			>;
-		};
-
-		pinctrl_modem_reset_sleep: modemreset_sleepgrp {
-			fsl,pins = <
-				IMX8QXP_CSI_MCLK_LSIO_GPIO3_IO01	0x07800021
-			>;
-		};
-
 		pinctrl_sai1: sai1grp {
 			fsl,pins = <
 				IMX8QXP_FLEXCAN1_TX_ADMA_SAI1_RXD	0x06000040
@@ -444,7 +421,6 @@
 &lpuart1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_lpuart1>;
-	resets = <&modem_reset>;
 	status = "okay";
 };
 
@@ -524,7 +500,7 @@
 	wm8960: wm8960@1a {
 		compatible = "wlf,wm8960";
 		reg = <0x1a>;
-		clocks = <&mclkout0_lpcg 0>;
+		clocks = <&mclkout0_lpcg IMX_LPCG_CLK_0>;
 		clock-names = "mclk";
 		wlf,shared-lrclk;
 		wlf,hp-cfg = <2 2 3>;
@@ -532,7 +508,7 @@
 		assigned-clocks = <&clk IMX_SC_R_AUDIO_PLL_0 IMX_SC_PM_CLK_PLL>,
 				<&clk IMX_SC_R_AUDIO_PLL_0 IMX_SC_PM_CLK_SLV_BUS>,
 				<&clk IMX_SC_R_AUDIO_PLL_0 IMX_SC_PM_CLK_MST_BUS>,
-				<&mclkout0_lpcg 0>;
+				<&mclkout0_lpcg IMX_LPCG_CLK_0>;
 		assigned-clock-rates = <786432000>, <49152000>, <12288000>, <12288000>;
 	};
 
@@ -549,7 +525,7 @@
 	assigned-clocks = <&clk IMX_SC_R_AUDIO_PLL_0 IMX_SC_PM_CLK_PLL>,
 			<&clk IMX_SC_R_AUDIO_PLL_0 IMX_SC_PM_CLK_SLV_BUS>,
 			<&clk IMX_SC_R_AUDIO_PLL_0 IMX_SC_PM_CLK_MST_BUS>,
-			<&sai1_lpcg 0>; /* FIXME: should be sai1, original code is 0 */
+			<&sai1_lpcg IMX_LPCG_CLK_0>; /* FIXME: should be sai1, original code is 0 */
 	assigned-clock-rates = <786432000>, <49152000>, <12288000>, <49152000>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_sai1>;

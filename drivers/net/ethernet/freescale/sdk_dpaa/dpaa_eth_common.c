@@ -33,6 +33,7 @@
 #include <linux/module.h>
 #include <linux/of_platform.h>
 #include <linux/of_net.h>
+#include <linux/platform_device.h>
 #include <linux/etherdevice.h>
 #include <linux/kthread.h>
 #include <linux/percpu.h>
@@ -228,9 +229,10 @@ EXPORT_SYMBOL(dpa_timeout);
 /* net_device */
 
 /**
- * @param net_dev the device for which statistics are calculated
- * @param stats the function fills this structure with the device's statistics
- * @return the address of the structure containing the statistics
+ * dpa_get_stats64() - Implementation of ndo_get_stats64()
+ *
+ * @net_dev: the device for which statistics are calculated
+ * @stats: the function fills this structure with the device's statistics
  *
  * Calculates the statistics for the given device by adding the statistics
  * collected by each CPU.
@@ -343,19 +345,6 @@ static void dpa_ts_tx_disable(struct net_device *dev)
 {
 	struct dpa_priv_s *priv = netdev_priv(dev);
 
-#if 0
-/* the RTC might be needed by the Rx Ts, cannot disable here
- * no separate ptp_disable API for Rx/Tx, cannot disable here
- */
-	struct mac_device *mac_dev = priv->mac_dev;
-
-	if (mac_dev->fm_rtc_disable)
-		mac_dev->fm_rtc_disable(get_fm_handle(dev));
-
-	if (mac_dev->ptp_disable)
-		mac_dev->ptp_disable(mac_dev->get_mac_handle(mac_dev));
-#endif
-
 	priv->ts_tx_en = false;
 }
 
@@ -373,19 +362,6 @@ static void dpa_ts_rx_enable(struct net_device *dev)
 static void dpa_ts_rx_disable(struct net_device *dev)
 {
 	struct dpa_priv_s *priv = netdev_priv(dev);
-
-#if 0
-/* the RTC might be needed by the Tx Ts, cannot disable here
- * no separate ptp_disable API for Rx/Tx, cannot disable here
- */
-	struct mac_device *mac_dev = priv->mac_dev;
-
-	if (mac_dev->fm_rtc_disable)
-		mac_dev->fm_rtc_disable(get_fm_handle(dev));
-
-	if (mac_dev->ptp_disable)
-		mac_dev->ptp_disable(mac_dev->get_mac_handle(mac_dev));
-#endif
 
 	priv->ts_rx_en = false;
 }
@@ -456,9 +432,15 @@ int dpa_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 }
 EXPORT_SYMBOL(dpa_ioctl);
 
-int __cold dpa_remove(struct platform_device *of_dev)
+void dpa_destroy_cgr(struct qman_cgr *cgr)
 {
-	int			err;
+	qman_delete_cgr_safe(cgr);
+	qman_release_cgrid(cgr->cgrid);
+}
+EXPORT_SYMBOL(dpa_destroy_cgr);
+
+void __cold dpa_remove(struct platform_device *of_dev)
+{
 	struct device		*dev;
 	struct net_device	*net_dev;
 	struct dpa_priv_s	*priv;
@@ -473,12 +455,11 @@ int __cold dpa_remove(struct platform_device *of_dev)
 	dev_set_drvdata(dev, NULL);
 	unregister_netdev(net_dev);
 
-	err = dpa_fq_free(dev, &priv->dpa_fq_list);
+	dpa_fq_free(dev, &priv->dpa_fq_list);
 
-	qman_delete_cgr_safe(&priv->ingress_cgr);
-	qman_release_cgrid(priv->ingress_cgr.cgrid);
-	qman_delete_cgr_safe(&priv->cgr_data.cgr);
-	qman_release_cgrid(priv->cgr_data.cgr.cgrid);
+	dpa_destroy_cgr(&priv->ingress_cgr);
+	dpa_destroy_cgr(&priv->ingress_cgr_hi_prio);
+	dpa_destroy_cgr(&priv->cgr_data.cgr);
 
 	dpa_private_napi_del(net_dev);
 
@@ -498,8 +479,6 @@ int __cold dpa_remove(struct platform_device *of_dev)
 #endif
 
 	free_netdev(net_dev);
-
-	return err;
 }
 EXPORT_SYMBOL(dpa_remove);
 
@@ -999,8 +978,7 @@ void dpaa_eth_add_channel(u16 channel)
 }
 EXPORT_SYMBOL(dpaa_eth_add_channel);
 
-/**
- * Congestion group state change notification callback.
+/* Congestion group state change notification callback.
  * Stops the device's egress queues while they are congested and
  * wakes them upon exiting congested state.
  * Also updates some CGR-related stats.
@@ -1196,6 +1174,17 @@ void dpa_fq_setup(struct dpa_priv_s *priv, const struct dpa_fq_cbs_t *fq_cbs,
 }
 EXPORT_SYMBOL(dpa_fq_setup);
 
+static void dpa_fq_init_cgr(struct qm_mcc_initfq *initfq, uint8_t cgid,
+			    signed char oal)
+{
+	initfq->we_mask |= QM_INITFQ_WE_CGID;
+	initfq->fqd.fq_ctrl |= QM_FQCTRL_CGE;
+	initfq->fqd.cgid = cgid;
+	initfq->we_mask |= QM_INITFQ_WE_OAC;
+	initfq->fqd.oac_init.oac = QM_OAC_CG;
+	initfq->fqd.oac_init.oal = oal;
+}
+
 int dpa_fq_init(struct dpa_fq *dpa_fq, bool td_enable)
 {
 	int			 _errno;
@@ -1222,6 +1211,9 @@ int dpa_fq_init(struct dpa_fq *dpa_fq, bool td_enable)
 	fq = &dpa_fq->fq_base;
 
 	if (dpa_fq->init) {
+		signed char oal = min(sizeof(struct sk_buff) + priv->tx_headroom,
+				      (size_t)FSL_QMAN_MAX_OAL);
+
 		memset(&initfq, 0, sizeof(initfq));
 
 		initfq.we_mask = QM_INITFQ_WE_FQCTRL;
@@ -1245,11 +1237,8 @@ int dpa_fq_init(struct dpa_fq *dpa_fq, bool td_enable)
 		 * place them in the netdev's CGR, along with the Tx FQs.
 		 */
 		if (dpa_fq->fq_type == FQ_TYPE_TX ||
-				dpa_fq->fq_type == FQ_TYPE_TX_CONFIRM ||
-				dpa_fq->fq_type == FQ_TYPE_TX_CONF_MQ) {
-			initfq.we_mask |= QM_INITFQ_WE_CGID;
-			initfq.fqd.fq_ctrl |= QM_FQCTRL_CGE;
-			initfq.fqd.cgid = (uint8_t)priv->cgr_data.cgr.cgrid;
+		    dpa_fq->fq_type == FQ_TYPE_TX_CONFIRM ||
+		    dpa_fq->fq_type == FQ_TYPE_TX_CONF_MQ)
 			/* Set a fixed overhead accounting, in an attempt to
 			 * reduce the impact of fixed-size skb shells and the
 			 * driver's needed headroom on system memory. This is
@@ -1259,12 +1248,7 @@ int dpa_fq_init(struct dpa_fq *dpa_fq, bool td_enable)
 			 * insufficient value, but even that is better than
 			 * no overhead accounting at all.
 			 */
-			initfq.we_mask |= QM_INITFQ_WE_OAC;
-			initfq.fqd.oac_init.oac = QM_OAC_CG;
-			initfq.fqd.oac_init.oal =
-				(signed char)(min(sizeof(struct sk_buff) +
-				priv->tx_headroom, (size_t)FSL_QMAN_MAX_OAL));
-		}
+			dpa_fq_init_cgr(&initfq, priv->cgr_data.cgr.cgrid, oal);
 
 		if (td_enable) {
 			initfq.we_mask |= QM_INITFQ_WE_TDTHRESH;
@@ -1297,22 +1281,18 @@ int dpa_fq_init(struct dpa_fq *dpa_fq, bool td_enable)
 
 		/* Put all *private* ingress queues in our "ingress CGR". */
 		if (priv->use_ingress_cgr &&
-				(dpa_fq->fq_type == FQ_TYPE_RX_DEFAULT ||
-				 dpa_fq->fq_type == FQ_TYPE_RX_ERROR ||
-				 dpa_fq->fq_type == FQ_TYPE_RX_PCD ||
-				 dpa_fq->fq_type == FQ_TYPE_RX_PCD_HI_PRIO)) {
-			initfq.we_mask |= QM_INITFQ_WE_CGID;
-			initfq.fqd.fq_ctrl |= QM_FQCTRL_CGE;
-			initfq.fqd.cgid = (uint8_t)priv->ingress_cgr.cgrid;
+		    (dpa_fq->fq_type == FQ_TYPE_RX_DEFAULT ||
+		     dpa_fq->fq_type == FQ_TYPE_RX_ERROR ||
+		     dpa_fq->fq_type == FQ_TYPE_RX_PCD))
 			/* Set a fixed overhead accounting, just like for the
 			 * egress CGR.
 			 */
-			initfq.we_mask |= QM_INITFQ_WE_OAC;
-			initfq.fqd.oac_init.oac = QM_OAC_CG;
-			initfq.fqd.oac_init.oal =
-				(signed char)(min(sizeof(struct sk_buff) +
-				priv->tx_headroom, (size_t)FSL_QMAN_MAX_OAL));
-		}
+			dpa_fq_init_cgr(&initfq, priv->ingress_cgr.cgrid, oal);
+
+		if (priv->use_ingress_cgr &&
+		    dpa_fq->fq_type == FQ_TYPE_RX_PCD_HI_PRIO)
+			dpa_fq_init_cgr(&initfq, priv->ingress_cgr_hi_prio.cgrid,
+					oal);
 
 		/* Initialization common to all ingress queues */
 		if (dpa_fq->flags & QMAN_FQ_FLAG_NO_ENQUEUE) {
@@ -1660,8 +1640,7 @@ void count_ern(struct dpa_percpu_priv_s *percpu_priv,
 }
 EXPORT_SYMBOL(count_ern);
 
-/**
- * Turn on HW checksum computation for this outgoing frame.
+/* Turn on HW checksum computation for this outgoing frame.
  * If the current protocol is not something we support in this regard
  * (or if the stack has already computed the SW checksum), we do nothing.
  *

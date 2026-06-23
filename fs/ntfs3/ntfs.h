@@ -520,7 +520,7 @@ struct ATTR_LIST_ENTRY {
 	__le64 vcn;		// 0x08: Starting VCN of this attribute.
 	struct MFT_REF ref;	// 0x10: MFT record number with attribute.
 	__le16 id;		// 0x18: struct ATTRIB ID.
-	__le16 name[];		// 0x1A: Just to align. To get real name can use name_off.
+	__le16 name[];		// 0x1A: To get real name use name_off.
 
 }; // sizeof(0x20)
 
@@ -561,8 +561,7 @@ struct NTFS_DUP_INFO {
 	__le64 alloc_size;	// 0x20: Data attribute allocated size, multiple of cluster size.
 	__le64 data_size;	// 0x28: Data attribute size <= Dataalloc_size.
 	enum FILE_ATTRIBUTE fa;	// 0x30: Standard DOS attributes & more.
-	__le16 ea_size;		// 0x34: Packed EAs.
-	__le16 reparse;		// 0x36: Used by Reparse.
+	__le32 extend_data;	// 0x34: Extended data.
 
 }; // 0x38
 
@@ -717,7 +716,7 @@ static inline struct NTFS_DE *hdr_first_de(const struct INDEX_HDR *hdr)
 	struct NTFS_DE *e;
 	u16 esize;
 
-	if (de_off >= used || de_off + sizeof(struct NTFS_DE) > used )
+	if (de_off >= used || size_add(de_off, sizeof(struct NTFS_DE)) > used)
 		return NULL;
 
 	e = Add2Ptr(hdr, de_off);
@@ -999,9 +998,6 @@ struct REPARSE_POINT {
 };
 
 static_assert(sizeof(struct REPARSE_POINT) == 0x18);
-
-/* Maximum allowed size of the reparse data. */
-#define MAXIMUM_REPARSE_DATA_BUFFER_SIZE	(16 * 1024)
 
 /*
  * The value of the following constant needs to satisfy the following

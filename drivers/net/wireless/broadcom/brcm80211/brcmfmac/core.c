@@ -1298,7 +1298,7 @@ static void brcmf_del_if(struct brcmf_pub *drvr, s32 bsscfgidx,
 
 	/* Stop the aperiodic TWT Session cleanup activity */
 	if (timer_pending(&ifp->twt_evt_timeout))
-		del_timer_sync(&ifp->twt_evt_timeout);
+		timer_delete_sync(&ifp->twt_evt_timeout);
 
 	if (ifp->ndev) {
 		if (bsscfgidx == 0) {
@@ -1593,7 +1593,7 @@ static ssize_t bus_reset_write(struct file *file, const char __user *user_buf,
 
 static const struct file_operations bus_reset_fops = {
 	.open	= simple_open,
-	.llseek	= no_llseek,
+	.llseek	= noop_llseek,
 	.write	= bus_reset_write,
 };
 

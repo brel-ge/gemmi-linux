@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright 2024 NXP
+ * Copyright 2024,2026 NXP
  *
  */
 
@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
@@ -22,6 +23,8 @@
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-mc.h>
 #include <media/v4l2-subdev.h>
+
+#include "neoisp/neoisp_core.h"
 
 /* CSI Pixel Formaterr Registers Define */
 
@@ -97,6 +100,7 @@ struct csi_formatter {
 	u64 enabled_streams;
 
 	u32 reg_offset;
+	struct device *isp_dev;
 };
 
 struct dt_index {
@@ -133,7 +137,7 @@ static const struct formatter_pix_format formats[] = {
 		.code = MEDIA_BUS_FMT_RGB565_1X16,
 		.data_type = MIPI_CSI2_DT_RGB565,
 	}, {
-		.code = MEDIA_BUS_FMT_BGR888_1X24,
+		.code = MEDIA_BUS_FMT_RGB888_1X24,
 		.data_type = MIPI_CSI2_DT_RGB888,
 	},
 	/* RAW (Bayer and greyscale) formats. */
@@ -230,6 +234,28 @@ static const struct formatter_pix_format *find_csi_format(u32 code)
 	return &formats[0];
 }
 
+static int neoisp_core_probe(struct device **isp_dev, struct platform_device *pdev)
+{
+#if IS_ENABLED(CONFIG_VIDEO_NXP_NEOISP)
+	struct platform_device *neoisp;
+	struct device_node *of_neoisp;
+
+	of_neoisp = of_parse_phandle(pdev->dev.of_node, "nxp,neoisp", 0);
+	if (!of_neoisp)
+		return 0;
+
+	neoisp = of_find_device_by_node(of_neoisp);
+	if (!neoisp)
+		return 0;
+
+	if (!platform_get_drvdata(neoisp))
+		return -EPROBE_DEFER;
+
+	*isp_dev = &neoisp->dev;
+#endif
+	return 0;
+}
+
 /* -----------------------------------------------------------------------------
  * V4L2 subdev operations
  */
@@ -278,6 +304,16 @@ static int formatter_subdev_init_state(struct v4l2_subdev *sd,
 	return __formatter_subdev_set_routing(sd, sd_state, &routing);;
 }
 
+static int formatter_subdev_registered(struct v4l2_subdev *sd)
+{
+	struct csi_formatter *formatter = sd_to_formatter(sd);
+
+	if (!formatter->isp_dev)
+		return 0;
+
+	return neoisp_core_media_register(formatter->isp_dev, sd);
+}
+
 static int formatter_subdev_enum_mbus_code(struct v4l2_subdev *sd,
 					   struct v4l2_subdev_state *sd_state,
 					   struct v4l2_subdev_mbus_code_enum *code)
@@ -288,8 +324,8 @@ static int formatter_subdev_enum_mbus_code(struct v4l2_subdev *sd,
 		if (code->index > 0)
 			return -EINVAL;
 
-		fmt = v4l2_subdev_state_get_stream_format(sd_state, code->pad,
-							  code->stream);
+		fmt = v4l2_subdev_state_get_format(sd_state, code->pad,
+						   code->stream);
 		code->code = fmt->code;
 		return 0;
 	}
@@ -327,8 +363,8 @@ static int formatter_subdev_set_fmt(struct v4l2_subdev *sd,
 			      &sdformat->format.height, 1,
 			      CSI_FORMATTER_MAX_PIX_HEIGHT, 0, 0);
 
-	fmt = v4l2_subdev_state_get_stream_format(sd_state, sdformat->pad,
-						  sdformat->stream);
+	fmt = v4l2_subdev_state_get_format(sd_state, sdformat->pad,
+					   sdformat->stream);
 	*fmt = sdformat->format;
 
 	/* Set default code if user set an invalid value */
@@ -618,7 +654,6 @@ static int formatter_subdev_disable_streams(struct v4l2_subdev *sd,
 }
 
 static const struct v4l2_subdev_pad_ops formatter_subdev_pad_ops = {
-	.init_cfg = formatter_subdev_init_state,
 	.enum_mbus_code	= formatter_subdev_enum_mbus_code,
 	.get_fmt = v4l2_subdev_get_fmt,
 	.set_fmt = formatter_subdev_set_fmt,
@@ -630,6 +665,11 @@ static const struct v4l2_subdev_pad_ops formatter_subdev_pad_ops = {
 
 static const struct v4l2_subdev_ops formatter_subdev_ops = {
 	.pad   = &formatter_subdev_pad_ops,
+};
+
+static const struct v4l2_subdev_internal_ops formatter_internal_ops = {
+	.init_state = formatter_subdev_init_state,
+	.registered = formatter_subdev_registered,
 };
 
 /* -----------------------------------------------------------------------------
@@ -649,6 +689,7 @@ static int csi_formatter_subdev_init(struct csi_formatter *formatter)
 	v4l2_subdev_init(sd, &formatter_subdev_ops);
 
 	snprintf(sd->name, sizeof(sd->name), "%s", dev_name(formatter->dev));
+	sd->internal_ops = &formatter_internal_ops;
 
 	sd->owner = THIS_MODULE;
 	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
@@ -827,6 +868,13 @@ static int csi_formatter_probe(struct platform_device *pdev)
 		return PTR_ERR(formatter->clk);
 	}
 
+	/* Check if neoisp is connected to formatter */
+	ret = neoisp_core_probe(&formatter->isp_dev, pdev);
+	if (ret) {
+		platform_device_put(pdev);
+		return ret;
+	}
+
 	ret = csi_formatter_subdev_init(formatter);
 	if (ret < 0) {
 		dev_err(dev, "formatter subdev init fail\n");
@@ -851,7 +899,7 @@ static int csi_formatter_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int csi_formatter_remove(struct platform_device *pdev)
+static void csi_formatter_remove(struct platform_device *pdev)
 {
 	struct v4l2_subdev *sd = platform_get_drvdata(pdev);
 	struct csi_formatter *formatter = sd_to_formatter(sd);
@@ -866,7 +914,6 @@ static int csi_formatter_remove(struct platform_device *pdev)
 	fwnode_handle_put(formatter->sd.fwnode);
 
 	pm_runtime_set_suspended(&pdev->dev);
-	return 0;
 }
 
 static const struct of_device_id csi_formatter_of_match[] = {
@@ -875,7 +922,7 @@ static const struct of_device_id csi_formatter_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, csi_formatter_of_match);
 
-static struct platform_driver dwc_csi_device_driver = {
+static struct platform_driver csi_formatter_device_driver = {
 	.driver = {
 		.owner          = THIS_MODULE,
 		.name           = CSI_FORMATTER_DRV_NAME,
@@ -886,7 +933,7 @@ static struct platform_driver dwc_csi_device_driver = {
 	.remove = csi_formatter_remove,
 };
 
-module_platform_driver(dwc_csi_device_driver);
+module_platform_driver(csi_formatter_device_driver);
 
 MODULE_DESCRIPTION("NXP CSI Pixel Formatter driver");
 MODULE_LICENSE("GPL");

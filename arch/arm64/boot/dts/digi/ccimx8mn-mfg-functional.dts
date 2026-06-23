@@ -37,10 +37,6 @@
 	};
 };
 
-&cameradev {
-	status = "okay";
-};
-
 &fec1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_fec1_gpio>,
@@ -125,19 +121,15 @@
 	};
 };
 
-&isi_0 {
+&isi {
 	status = "okay";
-
-	cap_device {
-		status = "okay";
-	};
 };
 
 &lcdif {
 	status = "okay";
 };
 
-&mipi_csi_1 {
+&mipi_csi {
 	#address-cells = <1>;
 	#size-cells = <0>;
 	status = "okay";

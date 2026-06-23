@@ -121,7 +121,7 @@ int dm_dirty_log_type_register(struct dm_dirty_log_type *type)
 	if (!__find_dirty_log_type(type->name))
 		list_add(&type->list, &_log_types);
 	else
-		r = -EEXIST;
+		r = -EBUSY;
 	spin_unlock(&_lock);
 
 	return r;
@@ -908,5 +908,5 @@ module_init(dm_dirty_log_init);
 module_exit(dm_dirty_log_exit);
 
 MODULE_DESCRIPTION(DM_NAME " dirty region log");
-MODULE_AUTHOR("Joe Thornber, Heinz Mauelshagen <dm-devel@redhat.com>");
+MODULE_AUTHOR("Joe Thornber, Heinz Mauelshagen <dm-devel@lists.linux.dev>");
 MODULE_LICENSE("GPL");

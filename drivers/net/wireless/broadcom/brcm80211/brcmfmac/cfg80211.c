@@ -2025,7 +2025,8 @@ static s32 brcmf_set_retry(struct net_device *ndev, u32 retry, bool l)
 	return err;
 }
 
-static s32 brcmf_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed)
+static s32 brcmf_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx,
+					   u32 changed)
 {
 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
 	struct net_device *ndev = cfg_to_ndev(cfg);
@@ -3306,6 +3307,7 @@ brcmf_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *ndev,
 
 static s32
 brcmf_cfg80211_set_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev,
+			    int radio_idx,
 			    enum nl80211_tx_power_setting type, s32 mbm)
 {
 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
@@ -3357,7 +3359,7 @@ done:
 
 static s32
 brcmf_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev,
-			    s32 *dbm)
+			    int radio_idx, unsigned int link_id, s32 *dbm)
 {
 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
 	struct brcmf_cfg80211_vif *vif = wdev_to_vif(wdev);
@@ -4072,7 +4074,6 @@ static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
 	if (!bss_data.chan)
 		return -EINVAL;
 
-	bss_data.scan_width = NL80211_BSS_CHAN_WIDTH_20;
 	bss_data.boottime_ns = ktime_to_ns(ktime_get_boottime());
 
 	notify_capability = le16_to_cpu(bi->capability);
@@ -4294,7 +4295,7 @@ static void brcmf_cfg80211_escan_timeout_worker(struct work_struct *work)
 static void brcmf_escan_timeout(struct timer_list *t)
 {
 	struct brcmf_cfg80211_info *cfg =
-			from_timer(cfg, t, escan_timeout);
+			timer_container_of(cfg, t, escan_timeout);
 	struct brcmf_pub *drvr = cfg->pub;
 
 	if (cfg->int_escan_map || cfg->scan_request) {
@@ -6545,13 +6546,13 @@ static int brcmf_cfg80211_stop_ap(struct wiphy *wiphy, struct net_device *ndev,
 
 static s32
 brcmf_cfg80211_change_beacon(struct wiphy *wiphy, struct net_device *ndev,
-			     struct cfg80211_beacon_data *info)
+			     struct cfg80211_ap_update *info)
 {
 	struct brcmf_if *ifp = netdev_priv(ndev);
 
 	brcmf_dbg(TRACE, "Enter\n");
 
-	return brcmf_config_ap_mgmt_ie(ifp->vif, info);
+	return brcmf_config_ap_mgmt_ie(ifp->vif, &info->beacon);
 }
 
 static int
@@ -6990,7 +6991,7 @@ brcmf_notify_csa_completion_ind(struct brcmf_if *ifp,
 
 	/* Send channel switch notification only for STA mode */
 	if (wdev->iftype == NL80211_IFTYPE_STATION) {
-		cfg80211_ch_switch_notify(ndev, &chandef, 0, 0);
+		cfg80211_ch_switch_notify(ndev, &chandef, 0);
 		brcmf_dbg(TRACE, "CSA sent upstream\n");
 	}
 
@@ -8015,17 +8016,8 @@ done:
 	roam_info.resp_ie = conn_info->resp_ie;
 	roam_info.resp_ie_len = conn_info->resp_ie_len;
 
-	if (((profile->use_fwsup == BRCMF_PROFILE_FWSUP_1X ||
-	      profile->use_fwsup == BRCMF_PROFILE_FWSUP_ROAM) &&
-	    (brcmf_has_pmkid(roam_info.req_ie, roam_info.req_ie_len, NULL) ||
-	     profile->is_ft || profile->is_okc)) ||
-	     profile->use_fwsup == BRCMF_PROFILE_FWSUP_PSK ||
-	     profile->use_fwsup == BRCMF_PROFILE_FWSUP_SAE)
-		roam_info.authorized = true;
-
 	cfg80211_roamed(ndev, &roam_info, GFP_KERNEL);
-	brcmf_dbg(CONN, "Report roaming result, authorized is %s\n",
-		  roam_info.authorized ? "true" : "false");
+	brcmf_dbg(CONN, "Report roaming result\n");
 
 	clear_bit(BRCMF_VIF_STATUS_CONNECTING, &ifp->vif->sme_state);
 	set_bit(BRCMF_VIF_STATUS_CONNECTED, &ifp->vif->sme_state);
@@ -8066,12 +8058,6 @@ brcmf_bss_connect_done(struct brcmf_cfg80211_info *cfg,
 		conn_params.req_ie_len = conn_info->req_ie_len;
 		conn_params.resp_ie = conn_info->resp_ie;
 		conn_params.resp_ie_len = conn_info->resp_ie_len;
-
-		if ((profile->use_fwsup == BRCMF_PROFILE_FWSUP_1X &&
-		     brcmf_has_pmkid(conn_params.req_ie, conn_params.req_ie_len, NULL)) ||
-		     profile->use_fwsup == BRCMF_PROFILE_FWSUP_PSK ||
-		     profile->use_fwsup == BRCMF_PROFILE_FWSUP_SAE)
-			conn_params.authorized = completed;
 
 		cfg80211_connect_done(ndev, &conn_params, GFP_KERNEL);
 		brcmf_dbg(CONN, "Report connect result - connection %s\n",
@@ -10139,10 +10125,6 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 		wiphy_ext_feature_set(wiphy,
 				      NL80211_EXT_FEATURE_AP_PMKSA_CACHING);
 	}
-	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_FBT) ||
-	    brcmf_feat_is_enabled(ifp, BRCMF_FEAT_OKC))
-		wiphy_ext_feature_set(wiphy,
-					NL80211_EXT_FEATURE_ROAM_OFFLOAD);
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_CQM_RSSI_LIST);
 
 	wiphy->mgmt_stypes = brcmf_txrx_stypes;

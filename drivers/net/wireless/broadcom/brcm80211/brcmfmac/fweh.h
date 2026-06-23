@@ -7,7 +7,7 @@
 #ifndef FWEH_H_
 #define FWEH_H_
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/skbuff.h>
 #include <linux/if_ether.h>
 #include <linux/if.h>
@@ -344,6 +344,7 @@ typedef int (*brcmf_fweh_handler_t)(struct brcmf_if *ifp,
  * @evt_handler: registered event handlers.
  */
 struct brcmf_fweh_info {
+	struct brcmf_pub *drvr;
 	bool p2pdev_setup_ongoing;
 	struct work_struct event_work;
 	spinlock_t evt_q_lock;

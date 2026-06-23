@@ -5,6 +5,7 @@
  * Copyright (C) 2021 Purism SPC
  */
 
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/delay.h>
@@ -24,6 +25,7 @@
 #include <linux/reset.h>
 #include <linux/spinlock.h>
 
+#include <media/mipi-csi2.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-fwnode.h>
@@ -39,6 +41,7 @@
 
 #define MIPI_CSI2_DEF_PIX_WIDTH			640
 #define MIPI_CSI2_DEF_PIX_HEIGHT		480
+#define MIPI_CSI2_DEF_MAX_LANES			4
 
 /* Register map definition */
 
@@ -62,6 +65,8 @@
 #define CSI2RX_CFG_VID_P_FIFO_SEND_LEVEL	0x188
 #define CSI2RX_CFG_DISABLE_PAYLOAD_1		0x130
 
+struct csi_state;
+
 enum {
 	ST_POWERED	= 1,
 	ST_STREAMING	= 2,
@@ -83,11 +88,11 @@ static const char * const imx8mq_mipi_csi_clk_id[CSI2_NUM_CLKS] = {
 
 #define CSI2_NUM_CLKS	ARRAY_SIZE(imx8mq_mipi_csi_clk_id)
 
-#define	GPR_CSI2_1_RX_ENABLE		BIT(13)
-#define	GPR_CSI2_1_VID_INTFC_ENB	BIT(12)
-#define	GPR_CSI2_1_HSEL			BIT(10)
-#define	GPR_CSI2_1_CONT_CLK_MODE	BIT(8)
-#define	GPR_CSI2_1_S_PRG_RXHS_SETTLE(x)	(((x) & 0x3f) << 2)
+struct imx8mq_plat_data {
+	int (*enable)(struct csi_state *state, u32 hs_settle);
+	void (*disable)(struct csi_state *state);
+	bool use_reg_csr;
+};
 
 /*
  * The send level configures the number of entries that must accumulate in
@@ -106,8 +111,10 @@ static const char * const imx8mq_mipi_csi_clk_id[CSI2_NUM_CLKS] = {
 
 struct csi_state {
 	struct device *dev;
+	const struct imx8mq_plat_data *pdata;
 	void __iomem *regs;
-	struct clk_bulk_data clks[CSI2_NUM_CLKS];
+	struct clk_bulk_data *clks;
+	int num_clks;
 	struct reset_control *rst;
 	struct regulator *mipi_phy_regulator;
 
@@ -115,11 +122,15 @@ struct csi_state {
 	struct media_pad pads[MIPI_CSI2_PADS_NUM];
 	struct v4l2_async_notifier notifier;
 	struct v4l2_subdev *src_sd;
+	u16 remote_pad;
 
 	struct v4l2_mbus_config_mipi_csi2 bus;
 
 	struct mutex lock; /* Protect state */
 	u32 state;
+	u32 id;
+	bool vchan;
+	u8 enable_count;
 
 	struct regmap *phy_gpr;
 	u8 phy_gpr_reg;
@@ -134,76 +145,361 @@ struct csi_state {
 
 struct csi2_pix_format {
 	u32 code;
+	u32 data_type;
 	u8 width;
+};
+
+/* -----------------------------------------------------------------------------
+ * i.MX8MQ GPR
+ */
+
+#define	GPR_CSI2_1_RX_ENABLE		BIT(13)
+#define	GPR_CSI2_1_VID_INTFC_ENB	BIT(12)
+#define	GPR_CSI2_1_HSEL			BIT(10)
+#define	GPR_CSI2_1_CONT_CLK_MODE	BIT(8)
+#define	GPR_CSI2_1_S_PRG_RXHS_SETTLE(x)	(((x) & 0x3f) << 2)
+
+static int imx8mq_gpr_enable(struct csi_state *state, u32 hs_settle)
+{
+	regmap_update_bits(state->phy_gpr,
+			   state->phy_gpr_reg,
+			   0x3fff,
+			   GPR_CSI2_1_RX_ENABLE |
+			   GPR_CSI2_1_VID_INTFC_ENB |
+			   GPR_CSI2_1_HSEL |
+			   GPR_CSI2_1_CONT_CLK_MODE |
+			   GPR_CSI2_1_S_PRG_RXHS_SETTLE(hs_settle));
+
+	return 0;
+}
+
+static const struct imx8mq_plat_data imx8mq_data = {
+	.enable = imx8mq_gpr_enable,
+};
+
+/* -----------------------------------------------------------------------------
+ * i.MX8QXP
+ */
+
+#define CSI2SS_PL_CLK_INTERVAL_US		100
+#define CSI2SS_PL_CLK_TIMEOUT_US		100000
+
+#define CSI2SS_PLM_CTRL				0x0
+#define CSI2SS_PLM_CTRL_ENABLE_PL		BIT(0)
+#define CSI2SS_PLM_CTRL_VSYNC_OVERRIDE		BIT(9)
+#define CSI2SS_PLM_CTRL_HSYNC_OVERRIDE		BIT(10)
+#define CSI2SS_PLM_CTRL_VALID_OVERRIDE		BIT(11)
+#define CSI2SS_PLM_CTRL_POLARITY_HIGH		BIT(12)
+#define CSI2SS_PLM_CTRL_PL_CLK_RUN		BIT(31)
+
+#define CSI2SS_PHY_CTRL				0x4
+#define CSI2SS_PHY_CTRL_RX_ENABLE		BIT(0)
+#define CSI2SS_PHY_CTRL_AUTO_PD_EN		BIT(1)
+#define CSI2SS_PHY_CTRL_DDRCLK_EN		BIT(2)
+#define CSI2SS_PHY_CTRL_CONT_CLK_MODE		BIT(3)
+#define CSI2SS_PHY_CTRL_RX_HS_SETTLE_MASK	GENMASK(9, 4)
+#define CSI2SS_PHY_CTRL_RTERM_SEL		BIT(21)
+#define CSI2SS_PHY_CTRL_PD			BIT(22)
+
+#define CSI2SS_DATA_TYPE_DISABLE_BF		0x38
+#define CSI2SS_DATA_TYPE_DISABLE_BF_MASK	GENMASK(23, 0)
+
+#define CSI2SS_CTRL_CLK_RESET			0x44
+#define CSI2SS_CTRL_CLK_RESET_EN		BIT(0)
+
+static int imx8qxp_gpr_enable(struct csi_state *state, u32 hs_settle)
+{
+	int ret;
+	u32 val;
+
+	/* Clear format */
+	regmap_clear_bits(state->phy_gpr, CSI2SS_DATA_TYPE_DISABLE_BF,
+			  CSI2SS_DATA_TYPE_DISABLE_BF_MASK);
+
+	regmap_write(state->phy_gpr, CSI2SS_PLM_CTRL, 0x0);
+
+	regmap_write(state->phy_gpr, CSI2SS_PHY_CTRL,
+		     FIELD_PREP(CSI2SS_PHY_CTRL_RX_HS_SETTLE_MASK, hs_settle) |
+		     CSI2SS_PHY_CTRL_RX_ENABLE | CSI2SS_PHY_CTRL_DDRCLK_EN |
+		     CSI2SS_PHY_CTRL_CONT_CLK_MODE | CSI2SS_PHY_CTRL_PD |
+		     CSI2SS_PHY_CTRL_RTERM_SEL | CSI2SS_PHY_CTRL_AUTO_PD_EN);
+
+	ret = regmap_read_poll_timeout(state->phy_gpr, CSI2SS_PLM_CTRL,
+				       val, !(val & CSI2SS_PLM_CTRL_PL_CLK_RUN),
+				       CSI2SS_PL_CLK_INTERVAL_US,
+				       CSI2SS_PL_CLK_TIMEOUT_US);
+
+	if (ret) {
+		dev_err(state->dev, "Timeout waiting for Pixel-Link clock\n");
+		return ret;
+	}
+
+	/* Enable Pixel link Master */
+	regmap_set_bits(state->phy_gpr, CSI2SS_PLM_CTRL,
+			CSI2SS_PLM_CTRL_ENABLE_PL | CSI2SS_PLM_CTRL_VALID_OVERRIDE);
+
+	/* PHY Enable */
+	regmap_clear_bits(state->phy_gpr, CSI2SS_PHY_CTRL,
+			  CSI2SS_PHY_CTRL_PD | CSI2SS_PLM_CTRL_POLARITY_HIGH);
+
+	/* Release Reset */
+	regmap_set_bits(state->phy_gpr, CSI2SS_CTRL_CLK_RESET, CSI2SS_CTRL_CLK_RESET_EN);
+
+	return ret;
+}
+
+static void imx8qxp_gpr_disable(struct csi_state *state)
+{
+	/* Disable Pixel Link */
+	regmap_write(state->phy_gpr, CSI2SS_PLM_CTRL, 0x0);
+
+	/* Disable PHY */
+	regmap_write(state->phy_gpr, CSI2SS_PHY_CTRL, 0x0);
+
+	regmap_clear_bits(state->phy_gpr, CSI2SS_CTRL_CLK_RESET,
+			  CSI2SS_CTRL_CLK_RESET_EN);
+};
+
+static const struct imx8mq_plat_data imx8qxp_data = {
+	.enable = imx8qxp_gpr_enable,
+	.disable = imx8qxp_gpr_disable,
+	.use_reg_csr = true,
+};
+
+/* -----------------------------------------------------------------------------
+ * i.MX8ULP CSR
+ */
+
+#define CSI2SS_BASE_OFFSET			0x0
+
+#define CSI2SS_PLM_CTRL_PL_CLK_RUN		BIT(31)
+#define CSI2SS_PLM_CTRL_VSYNC_OVERRIDE		BIT(9)
+#define CSI2SS_PLM_CTRL_HSYNC_OVERRIDE		BIT(10)
+#define CSI2SS_PLM_CTRL_VALID_OVERRIDE		BIT(11)
+#define CSI2SS_PLM_CTRL_POLARITY_MASK		BIT(12)
+#define CSI2SS_PLM_CTRL_ENABLE_PL		BIT(0)
+
+#define CSI2SS_PHY_CTRL_PD			BIT(22)
+#define CSI2SS_PHY_CTRL_RTERM_SEL		BIT(21)
+#define CSI2SS_PHY_CTRL_RX_HS_SETTLE(x)		FIELD_PREP(GENMASK(9, 4), (x))
+#define CSI2SS_PHY_CTRL_CONT_CLK_MODE		BIT(3)
+#define CSI2SS_PHY_CTRL_DDRCLK_EN		BIT(2)
+#define CSI2SS_PHY_CTRL_AUTO_PD_EN		BIT(1)
+#define CSI2SS_PHY_CTRL_RX_ENABLE		BIT(0)
+
+#define CSI2SS_PHY_STATUS			(CSI2SS_BASE_OFFSET + 0x8)
+#define CSI2SS_PHY_TEST_STATUS			(CSI2SS_BASE_OFFSET + 0x10)
+#define CSI2SS_PHY_TEST_STATUS_D0		(CSI2SS_BASE_OFFSET + 0x14)
+#define CSI2SS_PHY_TEST_STATUS_D1		(CSI2SS_BASE_OFFSET + 0x18)
+#define CSI2SS_PHY_TEST_STATUS_D2		(CSI2SS_BASE_OFFSET + 0x1C)
+#define CSI2SS_PHY_TEST_STATUS_D3		(CSI2SS_BASE_OFFSET + 0x20)
+
+#define CSI2SS_VC_INTERLACED			(CSI2SS_BASE_OFFSET + 0x30)
+#define CSI2SS_VC_INTERLACED_VC3		BIT(3)
+#define CSI2SS_VC_INTERLACED_VC2		BIT(2)
+#define CSI2SS_VC_INTERLACED_VC1		BIT(1)
+#define CSI2SS_VC_INTERLACED_VC0		BIT(0)
+#define CSI2SS_VC_INTERLACED_MASK		GENMASK(3, 0)
+
+#define CSI2SS_DATA_TYPE			(CSI2SS_BASE_OFFSET + 0x38)
+#define CSI2SS_DATA_TYPE_LEGACY_YUV420_8BIT	BIT(2)
+#define CSI2SS_DATA_TYPE_YUV422_8BIT		BIT(6)
+#define CSI2SS_DATA_TYPE_YUV422_10BIT		BIT(7)
+#define CSI2SS_DATA_TYPE_RGB444			BIT(8)
+#define CSI2SS_DATA_TYPE_RGB555			BIT(9)
+#define CSI2SS_DATA_TYPE_RGB565			BIT(10)
+#define CSI2SS_DATA_TYPE_RGB666			BIT(11)
+#define CSI2SS_DATA_TYPE_RGB888			BIT(12)
+#define CSI2SS_DATA_TYPE_RAW6			BIT(16)
+#define CSI2SS_DATA_TYPE_RAW8			BIT(18)
+#define CSI2SS_DATA_TYPE_RAW10			BIT(19)
+#define CSI2SS_DATA_TYPE_RAW12			BIT(20)
+#define CSI2SS_DATA_TYPE_RAW14			BIT(21)
+
+#define CSI2SS_YUV420_1ST_LINE_DATA_TYPE	(CSI2SS_BASE_OFFSET + 0x40)
+#define CSI2SS_YUV420_1ST_LINE_DATA_TYPE_ODD	0
+#define CSI2SS_YUV420_1ST_LINE_DATA_TYPE_EVEN	1
+
+#define CSI2SS_STREAM_FENCE_CTRL		(CSI2SS_BASE_OFFSET + 0x48)
+#define CSI2SS_STREAM_FENCE_VC3			BIT(3)
+#define CSI2SS_STREAM_FENCE_VC2			BIT(2)
+#define CSI2SS_STREAM_FENCE_VC1			BIT(1)
+#define CSI2SS_STREAM_FENCE_VC0			BIT(0)
+#define CSI2SS_STREAM_FENCE_CTRL_MASK		GENMASK(3, 0)
+
+#define CSI2SS_STREAM_FENCE_STATUS		(CSI2SS_BASE_OFFSET + 0x4C)
+
+static int imx8ulp_gpr_enable(struct csi_state *state, u32 hs_settle)
+{
+	struct device *dev = state->dev;
+	u32 val;
+
+	/* format */
+	regmap_clear_bits(state->phy_gpr,
+			   state->phy_gpr_reg + CSI2SS_DATA_TYPE,
+			   0xffffff);
+
+	/* polarity */
+	regmap_clear_bits(state->phy_gpr,
+			   state->phy_gpr_reg + CSI2SS_PLM_CTRL,
+			   CSI2SS_PLM_CTRL_VSYNC_OVERRIDE |
+			   CSI2SS_PLM_CTRL_HSYNC_OVERRIDE |
+			   CSI2SS_PLM_CTRL_VALID_OVERRIDE |
+			   CSI2SS_PLM_CTRL_POLARITY_MASK);
+
+	val = CSI2SS_PHY_CTRL_RX_ENABLE |
+	      CSI2SS_PHY_CTRL_DDRCLK_EN |
+	      CSI2SS_PHY_CTRL_CONT_CLK_MODE |
+	      CSI2SS_PHY_CTRL_RX_HS_SETTLE(hs_settle) |
+	      CSI2SS_PHY_CTRL_PD |
+	      CSI2SS_PHY_CTRL_RTERM_SEL |
+	      CSI2SS_PHY_CTRL_AUTO_PD_EN;
+
+	regmap_update_bits(state->phy_gpr,
+			   state->phy_gpr_reg + CSI2SS_PHY_CTRL,
+			   0xffffff,
+			   val);
+
+	regmap_read(state->phy_gpr, state->phy_gpr_reg + CSI2SS_PLM_CTRL, &val);
+	while (val & CSI2SS_PLM_CTRL_PL_CLK_RUN) {
+		msleep(10);
+		regmap_read(state->phy_gpr, state->phy_gpr_reg + CSI2SS_PLM_CTRL, &val);
+		dev_dbg(dev, "Waiting pl clk running, val=0x%x\n", val);
+	}
+
+	/* Enable Pixel link Master*/
+	regmap_set_bits(state->phy_gpr,
+			state->phy_gpr_reg + CSI2SS_PLM_CTRL,
+			CSI2SS_PLM_CTRL_ENABLE_PL |
+			CSI2SS_PLM_CTRL_VALID_OVERRIDE);
+
+	/* PHY Enable */
+	regmap_update_bits(state->phy_gpr,
+			   state->phy_gpr_reg + CSI2SS_PHY_CTRL,
+			   CSI2SS_PHY_CTRL_PD,
+			   0x0);
+
+	/* Release Reset */
+	reset_control_deassert(state->rst);
+
+	return 0;
+}
+
+static void imx8ulp_gpr_disable(struct csi_state *state)
+{
+	/* Disable Pixel Link */
+	regmap_write(state->phy_gpr, state->phy_gpr_reg + CSI2SS_PLM_CTRL, 0x0);
+
+	/* Disable  PHY */
+	regmap_write(state->phy_gpr, state->phy_gpr_reg + CSI2SS_PHY_CTRL, 0x0);
+
+	/* Reset */
+	reset_control_deassert(state->rst);
+}
+
+static const struct imx8mq_plat_data imx8ulp_data = {
+	.enable = imx8ulp_gpr_enable,
+	.disable = imx8ulp_gpr_disable,
 };
 
 static const struct csi2_pix_format imx8mq_mipi_csi_formats[] = {
 	/* RAW (Bayer and greyscale) formats. */
 	{
 		.code = MEDIA_BUS_FMT_SBGGR8_1X8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}, {
 		.code = MEDIA_BUS_FMT_SGBRG8_1X8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}, {
 		.code = MEDIA_BUS_FMT_SGRBG8_1X8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}, {
 		.code = MEDIA_BUS_FMT_SRGGB8_1X8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}, {
 		.code = MEDIA_BUS_FMT_Y8_1X8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}, {
 		.code = MEDIA_BUS_FMT_SBGGR10_1X10,
+		.data_type = MIPI_CSI2_DT_RAW10,
 		.width = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_SGBRG10_1X10,
+		.data_type = MIPI_CSI2_DT_RAW10,
 		.width = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_SGRBG10_1X10,
+		.data_type = MIPI_CSI2_DT_RAW10,
 		.width = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_SRGGB10_1X10,
+		.data_type = MIPI_CSI2_DT_RAW10,
 		.width = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_Y10_1X10,
+		.data_type = MIPI_CSI2_DT_RAW10,
 		.width = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_SBGGR12_1X12,
+		.data_type = MIPI_CSI2_DT_RAW12,
 		.width = 12,
 	}, {
 		.code = MEDIA_BUS_FMT_SGBRG12_1X12,
+		.data_type = MIPI_CSI2_DT_RAW12,
 		.width = 12,
 	}, {
 		.code = MEDIA_BUS_FMT_SGRBG12_1X12,
+		.data_type = MIPI_CSI2_DT_RAW12,
 		.width = 12,
 	}, {
 		.code = MEDIA_BUS_FMT_SRGGB12_1X12,
+		.data_type = MIPI_CSI2_DT_RAW12,
 		.width = 12,
 	}, {
 		.code = MEDIA_BUS_FMT_Y12_1X12,
+		.data_type = MIPI_CSI2_DT_RAW12,
 		.width = 12,
 	}, {
 		.code = MEDIA_BUS_FMT_SBGGR14_1X14,
+		.data_type = MIPI_CSI2_DT_RAW14,
 		.width = 14,
 	}, {
 		.code = MEDIA_BUS_FMT_SGBRG14_1X14,
+		.data_type = MIPI_CSI2_DT_RAW14,
 		.width = 14,
 	}, {
 		.code = MEDIA_BUS_FMT_SGRBG14_1X14,
+		.data_type = MIPI_CSI2_DT_RAW14,
 		.width = 14,
 	}, {
 		.code = MEDIA_BUS_FMT_SRGGB14_1X14,
+		.data_type = MIPI_CSI2_DT_RAW14,
 		.width = 14,
 	},
 	/* YUV formats */
 	{
 		.code = MEDIA_BUS_FMT_YUYV8_1X16,
+		.data_type = MIPI_CSI2_DT_YUV422_8B,
 		.width = 16,
 	}, {
 		.code = MEDIA_BUS_FMT_UYVY8_1X16,
+		.data_type = MIPI_CSI2_DT_YUV422_8B,
 		.width = 16,
+	},
+	/* RGB formats. */
+	{
+		.code = MEDIA_BUS_FMT_RGB565_1X16,
+		.data_type = MIPI_CSI2_DT_RGB565,
+		.width = 16,
+	}, {
+		.code = MEDIA_BUS_FMT_BGR888_1X24,
+		.data_type = MIPI_CSI2_DT_RGB888,
+		.width = 24,
 	}
 };
 
@@ -263,30 +559,23 @@ static void imx8mq_mipi_csi_set_params(struct csi_state *state)
 			      CSI2RX_SEND_LEVEL);
 }
 
-static int imx8mq_mipi_csi_clk_enable(struct csi_state *state)
+static struct clk *find_esc_clk(struct csi_state *state)
 {
-	return clk_bulk_prepare_enable(CSI2_NUM_CLKS, state->clks);
-}
+	int i;
 
-static void imx8mq_mipi_csi_clk_disable(struct csi_state *state)
-{
-	clk_bulk_disable_unprepare(CSI2_NUM_CLKS, state->clks);
-}
+	for (i = 0; i < state->num_clks; i++) {
+		if (!strcmp(state->clks[i].id, "esc"))
+			return state->clks[i].clk;
+	}
 
-static int imx8mq_mipi_csi_clk_get(struct csi_state *state)
-{
-	unsigned int i;
-
-	for (i = 0; i < CSI2_NUM_CLKS; i++)
-		state->clks[i].id = imx8mq_mipi_csi_clk_id[i];
-
-	return devm_clk_bulk_get(state->dev, CSI2_NUM_CLKS, state->clks);
+	return NULL;
 }
 
 static int imx8mq_mipi_csi_calc_hs_settle(struct csi_state *state,
 					  struct v4l2_subdev_state *sd_state,
 					  u32 *hs_settle)
 {
+	struct media_pad *src_pad;
 	s64 link_freq;
 	u32 lane_rate;
 	unsigned long esc_clk_rate;
@@ -294,13 +583,19 @@ static int imx8mq_mipi_csi_calc_hs_settle(struct csi_state *state,
 	const struct v4l2_mbus_framefmt *fmt;
 	const struct csi2_pix_format *csi2_fmt;
 
+	src_pad = media_entity_remote_source_pad_unique(&sd_state->sd->entity);
+	if (IS_ERR(src_pad)) {
+		dev_err(state->dev, "can't get source pad of %s (%ld)\n",
+			sd_state->sd->name, PTR_ERR(src_pad));
+		return PTR_ERR(src_pad);
+	}
+
 	/* Calculate the line rate from the pixel rate. */
 
-	fmt = v4l2_subdev_get_pad_format(&state->sd, sd_state, MIPI_CSI2_PAD_SINK);
+	fmt = v4l2_subdev_state_get_format(sd_state, MIPI_CSI2_PAD_SINK);
 	csi2_fmt = find_csi2_format(fmt->code);
 
-	link_freq = v4l2_get_link_freq(state->src_sd->ctrl_handler,
-				       csi2_fmt->width,
+	link_freq = v4l2_get_link_freq(src_pad, csi2_fmt->width,
 				       state->bus.num_data_lanes * 2);
 	if (link_freq < 0) {
 		dev_err(state->dev, "Unable to obtain link frequency: %d\n",
@@ -328,7 +623,7 @@ static int imx8mq_mipi_csi_calc_hs_settle(struct csi_state *state,
 	 * documentation recommends picking a value away from the boundaries.
 	 * Let's pick the average.
 	 */
-	esc_clk_rate = clk_get_rate(state->clks[CSI2_CLK_ESC].clk);
+	esc_clk_rate = clk_get_rate(find_esc_clk(state));
 	if (!esc_clk_rate) {
 		dev_err(state->dev, "Could not get esc clock rate.\n");
 		return -EINVAL;
@@ -364,14 +659,9 @@ static int imx8mq_mipi_csi_start_stream(struct csi_state *state,
 	if (ret)
 		return ret;
 
-	regmap_update_bits(state->phy_gpr,
-			   state->phy_gpr_reg,
-			   0x3fff,
-			   GPR_CSI2_1_RX_ENABLE |
-			   GPR_CSI2_1_VID_INTFC_ENB |
-			   GPR_CSI2_1_HSEL |
-			   GPR_CSI2_1_CONT_CLK_MODE |
-			   GPR_CSI2_1_S_PRG_RXHS_SETTLE(hs_settle));
+	ret = state->pdata->enable(state, hs_settle);
+	if (ret)
+		return ret;
 
 	return 0;
 }
@@ -379,6 +669,9 @@ static int imx8mq_mipi_csi_start_stream(struct csi_state *state,
 static void imx8mq_mipi_csi_stop_stream(struct csi_state *state)
 {
 	imx8mq_mipi_csi_write(state, CSI2RX_CFG_DISABLE_DATA_LANES, 0xf);
+
+	if (state->pdata->disable)
+		state->pdata->disable(state);
 }
 
 /* -----------------------------------------------------------------------------
@@ -390,77 +683,53 @@ static struct csi_state *mipi_sd_to_csi2_state(struct v4l2_subdev *sdev)
 	return container_of(sdev, struct csi_state, sd);
 }
 
-static int imx8mq_mipi_csi_s_stream(struct v4l2_subdev *sd, int enable)
+#define MIPI_CSI2_COLORSPACE V4L2_COLORSPACE_RAW
+#define MIPI_CSI2_YVBCR_ENC  V4L2_MAP_YCBCR_ENC_DEFAULT(MIPI_CSI2_COLORSPACE)
+#define MIPI_CSI2_XFER_FUNC  V4L2_MAP_XFER_FUNC_DEFAULT(MIPI_CSI2_COLORSPACE)
+#define MIPI_CSI2_QUANT      V4L2_MAP_QUANTIZATION_DEFAULT(false,	\
+					MIPI_CSI2_COLORSPACE,		\
+					MIPI_CSI2_XFER_FUNC)
+
+
+static const struct v4l2_mbus_framefmt imx8mq_mipi_csi_default_format = {
+	.code = MEDIA_BUS_FMT_SGBRG10_1X10,
+	.width = MIPI_CSI2_DEF_PIX_WIDTH,
+	.height = MIPI_CSI2_DEF_PIX_HEIGHT,
+	.field = V4L2_FIELD_NONE,
+	.colorspace = V4L2_COLORSPACE_RAW,
+	.ycbcr_enc = MIPI_CSI2_YVBCR_ENC,
+	.quantization = MIPI_CSI2_QUANT,
+	.xfer_func = MIPI_CSI2_YVBCR_ENC,
+};
+
+static int imx8mq_mipi_csi_init_state(struct v4l2_subdev *sd,
+				      struct v4l2_subdev_state *sd_state)
 {
 	struct csi_state *state = mipi_sd_to_csi2_state(sd);
-	struct v4l2_subdev_state *sd_state;
-	int ret = 0;
+	struct v4l2_subdev_krouting routing = {};
+	struct v4l2_subdev_route *routes;
+	int route_number = state->vchan ? MIPI_CSI2_DEF_MAX_LANES : 1;
+	int i;
 
-	if (enable) {
-		ret = pm_runtime_resume_and_get(state->dev);
-		if (ret < 0)
-			return ret;
+	routes = kcalloc(route_number, sizeof(*routes), GFP_KERNEL);
+	if (!routes)
+		return -ENOMEM;
+
+	for (i = 0; i < route_number; i++) {
+		struct v4l2_subdev_route *route = &routes[i];
+
+		route->source_pad = MIPI_CSI2_PAD_SOURCE;
+		route->sink_pad = MIPI_CSI2_PAD_SINK;
+		route->sink_stream = i;
+		route->source_stream = i;
+		route->flags = V4L2_SUBDEV_ROUTE_FL_ACTIVE;
 	}
 
-	mutex_lock(&state->lock);
+	routing.num_routes = route_number;
+	routing.routes = routes;
 
-	if (enable) {
-		if (state->state & ST_SUSPENDED) {
-			ret = -EBUSY;
-			goto unlock;
-		}
-
-		sd_state = v4l2_subdev_lock_and_get_active_state(sd);
-		ret = imx8mq_mipi_csi_start_stream(state, sd_state);
-		v4l2_subdev_unlock_state(sd_state);
-
-		if (ret < 0)
-			goto unlock;
-
-		ret = v4l2_subdev_call(state->src_sd, video, s_stream, 1);
-		if (ret < 0)
-			goto unlock;
-
-		state->state |= ST_STREAMING;
-	} else {
-		v4l2_subdev_call(state->src_sd, video, s_stream, 0);
-		imx8mq_mipi_csi_stop_stream(state);
-		state->state &= ~ST_STREAMING;
-	}
-
-unlock:
-	mutex_unlock(&state->lock);
-
-	if (!enable || ret < 0)
-		pm_runtime_put(state->dev);
-
-	return ret;
-}
-
-static int imx8mq_mipi_csi_init_cfg(struct v4l2_subdev *sd,
-				    struct v4l2_subdev_state *sd_state)
-{
-	struct v4l2_mbus_framefmt *fmt_sink;
-	struct v4l2_mbus_framefmt *fmt_source;
-
-	fmt_sink = v4l2_subdev_get_pad_format(sd, sd_state, MIPI_CSI2_PAD_SINK);
-	fmt_source = v4l2_subdev_get_pad_format(sd, sd_state, MIPI_CSI2_PAD_SOURCE);
-
-	fmt_sink->code = MEDIA_BUS_FMT_SGBRG10_1X10;
-	fmt_sink->width = MIPI_CSI2_DEF_PIX_WIDTH;
-	fmt_sink->height = MIPI_CSI2_DEF_PIX_HEIGHT;
-	fmt_sink->field = V4L2_FIELD_NONE;
-
-	fmt_sink->colorspace = V4L2_COLORSPACE_RAW;
-	fmt_sink->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(fmt_sink->colorspace);
-	fmt_sink->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(fmt_sink->colorspace);
-	fmt_sink->quantization =
-		V4L2_MAP_QUANTIZATION_DEFAULT(false, fmt_sink->colorspace,
-					      fmt_sink->ycbcr_enc);
-
-	*fmt_source = *fmt_sink;
-
-	return 0;
+	return v4l2_subdev_set_routing_with_fmt(sd, sd_state, &routing,
+						&imx8mq_mipi_csi_default_format);
 }
 
 static int imx8mq_mipi_csi_enum_mbus_code(struct v4l2_subdev *sd,
@@ -477,7 +746,7 @@ static int imx8mq_mipi_csi_enum_mbus_code(struct v4l2_subdev *sd,
 		if (code->index > 0)
 			return -EINVAL;
 
-		fmt = v4l2_subdev_get_pad_format(sd, sd_state, code->pad);
+		fmt = v4l2_subdev_state_get_format(sd_state, code->pad);
 		code->code = fmt->code;
 		return 0;
 	}
@@ -514,30 +783,272 @@ static int imx8mq_mipi_csi_set_fmt(struct v4l2_subdev *sd,
 	if (!csi2_fmt)
 		csi2_fmt = &imx8mq_mipi_csi_formats[0];
 
-	fmt = v4l2_subdev_get_pad_format(sd, sd_state, sdformat->pad);
+	fmt = v4l2_subdev_state_get_format(sd_state, sdformat->pad, sdformat->stream);
 
+	if (!fmt)
+		return -EINVAL;
+
+	*fmt = sdformat->format;
 	fmt->code = csi2_fmt->code;
-	fmt->width = sdformat->format.width;
-	fmt->height = sdformat->format.height;
-
-	sdformat->format = *fmt;
 
 	/* Propagate the format from sink to source. */
-	fmt = v4l2_subdev_get_pad_format(sd, sd_state, MIPI_CSI2_PAD_SOURCE);
+	fmt = v4l2_subdev_state_get_opposite_stream_format(sd_state, sdformat->pad,
+							   sdformat->stream);
+	if (!fmt)
+		return -EINVAL;
+
 	*fmt = sdformat->format;
 
 	return 0;
 }
 
+static int imx8mq_mipi_csi_get_frame_desc(struct v4l2_subdev *sd, unsigned int pad,
+					  struct v4l2_mbus_frame_desc *fd)
+{
+	struct csi_state *state = mipi_sd_to_csi2_state(sd);
+	struct v4l2_subdev_state *sd_state;
+	struct v4l2_mbus_frame_desc source_fd;
+	const struct v4l2_mbus_framefmt *fmt;
+	const struct csi2_pix_format *csi2_fmt;
+	struct v4l2_subdev_route *route;
+	int ret;
+
+
+	if (pad != MIPI_CSI2_PAD_SOURCE)
+		return -EINVAL;
+
+	sd_state = v4l2_subdev_lock_and_get_active_state(sd);
+	fmt = v4l2_subdev_state_get_format(sd_state, MIPI_CSI2_PAD_SOURCE);
+	csi2_fmt = find_csi2_format(fmt->code);
+	v4l2_subdev_unlock_state(sd_state);
+
+	if (!csi2_fmt)
+		csi2_fmt = &imx8mq_mipi_csi_formats[0];
+
+	memset(fd, 0, sizeof(*fd));
+
+	ret = v4l2_subdev_call(state->src_sd, pad, get_frame_desc,
+			       state->remote_pad, &source_fd);
+
+	fd->type = V4L2_MBUS_FRAME_DESC_TYPE_CSI2;
+
+	if (ret < 0) {
+		dev_warn(state->dev,
+			"Remote sub-device on pad %d should implement .get_frame_desc! Forcing VC = 0 and DT = %x\n",
+			pad, csi2_fmt->data_type);
+
+		fd->num_entries = 1;
+		fd->entry[0].flags = 0;
+		fd->entry[0].pixelcode = csi2_fmt->code;
+		fd->entry[0].bus.csi2.vc = 0;
+		fd->entry[0].bus.csi2.dt = csi2_fmt->data_type;
+
+		return 0;
+	}
+
+	sd_state = v4l2_subdev_lock_and_get_active_state(sd);
+
+	for_each_active_route(&sd_state->routing, route) {
+		struct v4l2_mbus_frame_desc_entry *entry = NULL;
+		unsigned int i;
+
+		if (route->source_pad != pad)
+			continue;
+
+		for (i = 0; i < source_fd.num_entries; ++i) {
+			if (source_fd.entry[i].stream == route->sink_stream) {
+				entry = &source_fd.entry[i];
+				break;
+			}
+		}
+
+		if (!entry) {
+			dev_err(state->dev,
+				"Failed to find stream from source frames desc\n");
+			ret = -EPIPE;
+			goto out_unlock;
+		}
+
+		fd->entry[fd->num_entries].stream = route->source_stream;
+		fd->entry[fd->num_entries].flags = entry->flags;
+		fd->entry[fd->num_entries].length = entry->length;
+		fd->entry[fd->num_entries].pixelcode = entry->pixelcode;
+		fd->entry[fd->num_entries].bus.csi2.vc = entry->bus.csi2.vc;
+		fd->entry[fd->num_entries].bus.csi2.dt = entry->bus.csi2.dt;
+
+		fd->num_entries++;
+	}
+
+out_unlock:
+	v4l2_subdev_unlock_state(sd_state);
+	return ret;
+}
+
+static struct v4l2_subdev *imx8mq_mipi_csi_xlate_streams(struct csi_state *state,
+							 struct v4l2_subdev_state *sd_state,
+							 u32 src_pad, u64 src_streams,
+							 u64 *sink_streams,
+							 u32 *remote_pad)
+{
+	u64 streams;
+	struct v4l2_subdev *remote_sd;
+	struct media_pad *pad;
+
+	streams = v4l2_subdev_state_xlate_streams(sd_state, src_pad,
+						  MIPI_CSI2_PAD_SINK,
+						  &src_streams);
+	if (!streams)
+		dev_dbg(state->dev, "no streams found on sink pad\n");
+
+	pad = media_pad_remote_pad_first(&state->pads[MIPI_CSI2_PAD_SINK]);
+	if (!pad) {
+		dev_dbg(state->dev, "no remote pad found for sink pad\n");
+		return ERR_PTR(-EPIPE);
+	}
+
+	remote_sd = media_entity_to_v4l2_subdev(pad->entity);
+	if (!remote_sd) {
+		dev_dbg(state->dev, "no entity connected to CSI2 input\n");
+		return ERR_PTR(-EPIPE);
+	}
+
+	*sink_streams = streams;
+	*remote_pad = pad->index;
+
+	return remote_sd;
+}
+
+static int imx8mq_mipi_csi_enable_streams(struct v4l2_subdev *sd,
+					  struct v4l2_subdev_state *sd_state,
+					  u32 src_pad, u64 streams_mask)
+{
+	struct csi_state *state = mipi_sd_to_csi2_state(sd);
+	struct v4l2_subdev *remote_sd;
+	u32 remote_pad;
+	u64 sink_streams;
+	int ret = 0;
+
+	ret = pm_runtime_resume_and_get(state->dev);
+	if (ret < 0)
+		return ret;
+
+	mutex_lock(&state->lock);
+
+	if (state->state & ST_SUSPENDED) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+
+	if (!state->enable_count) {
+		ret = imx8mq_mipi_csi_start_stream(state, sd_state);
+		if (ret < 0)
+			goto unlock;
+	}
+
+	remote_sd = imx8mq_mipi_csi_xlate_streams(state, sd_state, src_pad,
+						  streams_mask, &sink_streams,
+						  &remote_pad);
+	if (IS_ERR(remote_sd)) {
+		ret = PTR_ERR(remote_sd);
+		goto unlock;
+	}
+
+	ret = v4l2_subdev_enable_streams(remote_sd, remote_pad, sink_streams);
+	if (ret) {
+		dev_err(state->dev,
+			"failed to enable streams 0x%llx on '%s':%u: %d\n",
+			sink_streams, remote_sd->name, remote_pad, ret);
+		goto unlock;
+	}
+
+	state->state |= ST_STREAMING;
+	state->enable_count++;
+
+	mutex_unlock(&state->lock);
+
+	return 0;
+unlock:
+	imx8mq_mipi_csi_stop_stream(state);
+	mutex_unlock(&state->lock);
+	pm_runtime_put(state->dev);
+
+	return ret;
+}
+
+static int imx8mq_mipi_csi_disable_streams(struct v4l2_subdev *sd,
+					   struct v4l2_subdev_state *sd_state,
+					   u32 src_pad, u64 streams_mask)
+{
+	struct csi_state *state = mipi_sd_to_csi2_state(sd);
+	struct v4l2_subdev *remote_sd;
+	u64 sink_streams;
+	u32 remote_pad;
+	int ret = 0;
+
+	mutex_lock(&state->lock);
+
+	state->enable_count--;
+
+	remote_sd = imx8mq_mipi_csi_xlate_streams(state, sd_state, src_pad,
+						  streams_mask, &sink_streams,
+						  &remote_pad);
+	if (IS_ERR(remote_sd)) {
+		ret = PTR_ERR(remote_sd);
+		goto unlock;
+	}
+
+	ret = v4l2_subdev_disable_streams(remote_sd, remote_pad, sink_streams);
+	if (ret) {
+		dev_err(state->dev,
+			"failed to disable streams 0x%llx on '%s':%u: %d\n",
+			sink_streams, remote_sd->name, remote_pad, ret);
+		goto unlock;
+	}
+
+	if (!state->enable_count) {
+		imx8mq_mipi_csi_stop_stream(state);
+		state->state &= ~ST_STREAMING;
+	}
+
+unlock:
+	mutex_unlock(&state->lock);
+
+	return ret;
+}
+
+static int imx8mq_mipi_csi_set_routing(struct v4l2_subdev *sd,
+				       struct v4l2_subdev_state *state,
+				       enum v4l2_subdev_format_whence which,
+				       struct v4l2_subdev_krouting *routing)
+{
+	int ret;
+
+	if (which == V4L2_SUBDEV_FORMAT_ACTIVE &&
+	    media_entity_is_streaming(&sd->entity))
+		return -EBUSY;
+
+	ret = v4l2_subdev_routing_validate(sd, routing,
+					   V4L2_SUBDEV_ROUTING_ONLY_1_TO_1);
+	if (ret)
+		return ret;
+
+	return v4l2_subdev_set_routing_with_fmt(sd, state, routing,
+						&imx8mq_mipi_csi_default_format);
+}
+
 static const struct v4l2_subdev_video_ops imx8mq_mipi_csi_video_ops = {
-	.s_stream	= imx8mq_mipi_csi_s_stream,
+	.s_stream	= v4l2_subdev_s_stream_helper,
 };
 
 static const struct v4l2_subdev_pad_ops imx8mq_mipi_csi_pad_ops = {
-	.init_cfg		= imx8mq_mipi_csi_init_cfg,
 	.enum_mbus_code		= imx8mq_mipi_csi_enum_mbus_code,
 	.get_fmt		= v4l2_subdev_get_fmt,
 	.set_fmt		= imx8mq_mipi_csi_set_fmt,
+	.get_frame_desc		= imx8mq_mipi_csi_get_frame_desc,
+	.set_routing		= imx8mq_mipi_csi_set_routing,
+	.enable_streams		= imx8mq_mipi_csi_enable_streams,
+	.disable_streams	= imx8mq_mipi_csi_disable_streams,
+
 };
 
 static const struct v4l2_subdev_ops imx8mq_mipi_csi_subdev_ops = {
@@ -545,11 +1056,44 @@ static const struct v4l2_subdev_ops imx8mq_mipi_csi_subdev_ops = {
 	.pad	= &imx8mq_mipi_csi_pad_ops,
 };
 
+static const struct v4l2_subdev_internal_ops imx8mq_mipi_csi_internal_ops = {
+	.init_state		= imx8mq_mipi_csi_init_state,
+};
+
 /* -----------------------------------------------------------------------------
  * Media entity operations
  */
 
+static int imx8mq_mipi_csi_link_setup(struct media_entity *entity,
+				      const struct media_pad *local_pad,
+				      const struct media_pad *remote_pad, u32 flags)
+{
+	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(entity);
+	struct csi_state *state = mipi_sd_to_csi2_state(sd);
+	struct v4l2_subdev *remote_sd;
+
+	dev_info(state->dev, "link setup %s -> %s", remote_pad->entity->name,
+		local_pad->entity->name);
+
+	/* We only care about the link to the source. */
+	if (!(local_pad->flags & MEDIA_PAD_FL_SINK))
+		return 0;
+
+	remote_sd = media_entity_to_v4l2_subdev(remote_pad->entity);
+
+	if (flags & MEDIA_LNK_FL_ENABLED) {
+		if (state->src_sd)
+			return -EBUSY;
+
+		state->src_sd = remote_sd;
+		state->remote_pad = remote_pad->index;
+	}
+
+	return 0;
+}
+
 static const struct media_entity_operations imx8mq_mipi_csi_entity_ops = {
+	.link_setup	= imx8mq_mipi_csi_link_setup,
 	.link_validate	= v4l2_subdev_link_validate,
 	.get_fwnode_pad = v4l2_subdev_get_fwnode_pad_1_to_1,
 };
@@ -570,11 +1114,26 @@ static int imx8mq_mipi_csi_notify_bound(struct v4l2_async_notifier *notifier,
 {
 	struct csi_state *state = mipi_notifier_to_csi2_state(notifier);
 	struct media_pad *sink = &state->sd.entity.pads[MIPI_CSI2_PAD_SINK];
+	struct media_pad *pad;
+	int ret;
 
 	state->src_sd = sd;
 
-	return v4l2_create_fwnode_links_to_pad(sd, sink, MEDIA_LNK_FL_ENABLED |
+
+	ret = v4l2_create_fwnode_links_to_pad(sd, sink, MEDIA_LNK_FL_ENABLED |
 					       MEDIA_LNK_FL_IMMUTABLE);
+	if (ret < 0)
+		return ret;
+
+	/* After the link is created, store the remote pad number */
+	pad = media_pad_remote_pad_first(&state->pads[MIPI_CSI2_PAD_SINK]);
+	if (!pad) {
+		dev_err(state->dev, "no remote pad found for sink pad\n");
+		return -EPIPE;
+	}
+	state->remote_pad = pad->index;
+
+	return 0;
 }
 
 static const struct v4l2_async_notifier_operations imx8mq_mipi_csi_notify_ops = {
@@ -653,7 +1212,7 @@ static void imx8mq_mipi_csi_pm_suspend(struct device *dev)
 
 	if (state->state & ST_POWERED) {
 		imx8mq_mipi_csi_stop_stream(state);
-		imx8mq_mipi_csi_clk_disable(state);
+		clk_bulk_disable_unprepare(state->num_clks, state->clks);
 		state->state &= ~ST_POWERED;
 	}
 
@@ -671,7 +1230,7 @@ static int imx8mq_mipi_csi_pm_resume(struct device *dev)
 
 	if (!(state->state & ST_POWERED)) {
 		state->state |= ST_POWERED;
-		ret = imx8mq_mipi_csi_clk_enable(state);
+		ret = clk_bulk_prepare_enable(state->num_clks, state->clks);
 	}
 	if (state->state & ST_STREAMING) {
 		sd_state = v4l2_subdev_lock_and_get_active_state(sd);
@@ -689,19 +1248,22 @@ unlock:
 	return ret ? -EAGAIN : 0;
 }
 
-static int __maybe_unused imx8mq_mipi_csi_suspend(struct device *dev)
+static int imx8mq_mipi_csi_suspend(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct csi_state *state = mipi_sd_to_csi2_state(sd);
+	int ret;
 
-	imx8mq_mipi_csi_pm_suspend(dev);
+	ret = pm_runtime_force_suspend(dev);
+	if (ret < 0)
+		return ret;
 
 	state->state |= ST_SUSPENDED;
 
 	return 0;
 }
 
-static int __maybe_unused imx8mq_mipi_csi_resume(struct device *dev)
+static int imx8mq_mipi_csi_resume(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct csi_state *state = mipi_sd_to_csi2_state(sd);
@@ -709,10 +1271,10 @@ static int __maybe_unused imx8mq_mipi_csi_resume(struct device *dev)
 	if (!(state->state & ST_SUSPENDED))
 		return 0;
 
-	return imx8mq_mipi_csi_pm_resume(dev);
+	return pm_runtime_force_resume(dev);
 }
 
-static int __maybe_unused imx8mq_mipi_csi_runtime_suspend(struct device *dev)
+static int imx8mq_mipi_csi_runtime_suspend(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct csi_state *state = mipi_sd_to_csi2_state(sd);
@@ -727,7 +1289,7 @@ static int __maybe_unused imx8mq_mipi_csi_runtime_suspend(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused imx8mq_mipi_csi_runtime_resume(struct device *dev)
+static int imx8mq_mipi_csi_runtime_resume(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct csi_state *state = mipi_sd_to_csi2_state(sd);
@@ -743,10 +1305,9 @@ static int __maybe_unused imx8mq_mipi_csi_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops imx8mq_mipi_csi_pm_ops = {
-	SET_RUNTIME_PM_OPS(imx8mq_mipi_csi_runtime_suspend,
-			   imx8mq_mipi_csi_runtime_resume,
-			   NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(imx8mq_mipi_csi_suspend, imx8mq_mipi_csi_resume)
+	RUNTIME_PM_OPS(imx8mq_mipi_csi_runtime_suspend,
+		       imx8mq_mipi_csi_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(imx8mq_mipi_csi_suspend, imx8mq_mipi_csi_resume)
 };
 
 /* -----------------------------------------------------------------------------
@@ -759,11 +1320,12 @@ static int imx8mq_mipi_csi_subdev_init(struct csi_state *state)
 	int ret;
 
 	v4l2_subdev_init(sd, &imx8mq_mipi_csi_subdev_ops);
+	sd->internal_ops = &imx8mq_mipi_csi_internal_ops;
 	sd->owner = THIS_MODULE;
 	snprintf(sd->name, sizeof(sd->name), "%s %s",
 		 MIPI_CSI2_SUBDEV_NAME, dev_name(state->dev));
 
-	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_STREAMS;
 
 	sd->entity.function = MEDIA_ENT_F_VID_IF_BRIDGE;
 	sd->entity.ops = &imx8mq_mipi_csi_entity_ops;
@@ -826,6 +1388,25 @@ static int imx8mq_mipi_csi_parse_dt(struct csi_state *state)
 		return PTR_ERR(state->rst);
 	}
 
+	if (state->pdata->use_reg_csr) {
+		const struct regmap_config regmap_config = {
+			.reg_bits = 32,
+			.val_bits = 32,
+			.reg_stride = 4,
+		};
+		void __iomem *base;
+
+		base = devm_platform_ioremap_resource(to_platform_device(dev), 1);
+		if (IS_ERR(base))
+			return dev_err_probe(dev, PTR_ERR(base), "Missing CSR register\n");
+
+		state->phy_gpr = devm_regmap_init_mmio(dev, base, &regmap_config);
+		if (IS_ERR(state->phy_gpr))
+			return dev_err_probe(dev, PTR_ERR(state->phy_gpr),
+					     "Failed to init CSI MMIO regmap\n");
+		return 0;
+	}
+
 	ret = of_property_read_u32_array(np, "fsl,mipi-phy-gpr", out_val,
 					 ARRAY_SIZE(out_val));
 	if (ret) {
@@ -865,6 +1446,8 @@ static int imx8mq_mipi_csi_probe(struct platform_device *pdev)
 
 	state->dev = dev;
 
+	state->pdata = of_device_get_match_data(dev);
+
 	ret = imx8mq_mipi_csi_parse_dt(state);
 	if (ret < 0) {
 		dev_err(dev, "Failed to parse device tree: %d\n", ret);
@@ -876,9 +1459,9 @@ static int imx8mq_mipi_csi_probe(struct platform_device *pdev)
 	if (IS_ERR(state->regs))
 		return PTR_ERR(state->regs);
 
-	ret = imx8mq_mipi_csi_clk_get(state);
-	if (ret < 0)
-		return ret;
+	state->num_clks = devm_clk_bulk_get_all(dev, &state->clks);
+	if (state->num_clks < 0)
+		return dev_err_probe(dev, state->num_clks, "Failed to get clocks\n");
 
 	platform_set_drvdata(pdev, &state->sd);
 
@@ -942,18 +1525,20 @@ static void imx8mq_mipi_csi_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id imx8mq_mipi_csi_of_match[] = {
-	{ .compatible = "fsl,imx8mq-mipi-csi2", },
+	{ .compatible = "fsl,imx8mq-mipi-csi2", .data = &imx8mq_data },
+	{ .compatible = "fsl,imx8qxp-mipi-csi2", .data = &imx8qxp_data },
+	{ .compatible = "fsl,imx8ulp-mipi-csi2", .data = &imx8ulp_data },
 	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(of, imx8mq_mipi_csi_of_match);
 
 static struct platform_driver imx8mq_mipi_csi_driver = {
 	.probe		= imx8mq_mipi_csi_probe,
-	.remove_new	= imx8mq_mipi_csi_remove,
+	.remove		= imx8mq_mipi_csi_remove,
 	.driver		= {
 		.of_match_table = imx8mq_mipi_csi_of_match,
 		.name		= MIPI_CSI2_DRIVER_NAME,
-		.pm		= &imx8mq_mipi_csi_pm_ops,
+		.pm		= pm_ptr(&imx8mq_mipi_csi_pm_ops),
 	},
 };
 

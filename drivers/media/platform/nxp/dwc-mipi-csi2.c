@@ -315,17 +315,6 @@ static const struct dwc_csi_event dwc_events[] = {
 #define DWC_EVENT_MASK		0x500ff
 
 /* -----------------------------------------------------------------------------
- * Clocks
- */
-
-static const struct clk_bulk_data dwc_clks[] = {
-	{ .id = "per" },
-	{ .id = "pixel" },
-};
-
-#define DWC_NUM_CLKS		ARRAY_SIZE(dwc_clks)
-
-/* -----------------------------------------------------------------------------
  * Format helpers
  */
 
@@ -340,7 +329,8 @@ struct dwc_csi_device {
 	struct device *dev;
 	void __iomem *regs;
 	struct phy *phy;
-	struct clk_bulk_data clks[DWC_NUM_CLKS];
+	struct clk_bulk_data *clks;
+	int num_clks;
 
 	struct v4l2_subdev sd;
 	struct v4l2_async_notifier notifier;
@@ -569,7 +559,7 @@ static int dwc_csi_device_pg_enable(struct dwc_csi_device *csidev)
 
 	state = v4l2_subdev_lock_and_get_active_state(sd);
 	/* Pattern generator create data stream only according to stream 0 */
-	fmt = v4l2_subdev_state_get_stream_format(state, DWC_CSI2RX_PAD_SINK, 0);
+	fmt = v4l2_subdev_state_get_format(state, DWC_CSI2RX_PAD_SINK, 0);
 
 	val = CSI2RX_PPI_PG_PATTERN_HRES_HRES(fmt->width);
 	dwc_csi_write(csidev, CSI2RX_PPI_PG_PATTERN_HRES, val);
@@ -672,10 +662,11 @@ static int dwc_csi_get_dphy_configuration(struct dwc_csi_device *csidev,
 					  union phy_configure_opts *opts)
 {
 	struct phy_configure_opts_mipi_dphy *cfg = &opts->mipi_dphy;
-	struct v4l2_subdev *source = csidev->source_sd;
+	struct media_pad *src_pad =
+		&csidev->source_sd->entity.pads[csidev->remote_pad];
 	s64 link_freq;
 
-	link_freq = v4l2_get_link_freq(source->ctrl_handler,
+	link_freq = v4l2_get_link_freq(src_pad,
 				       csidev->csi_fmt->width,
 				       csidev->bus.num_data_lanes * 2);
 	if (link_freq < 0) {
@@ -693,10 +684,7 @@ static int dwc_csi_get_dphy_configuration(struct dwc_csi_device *csidev,
 
 static int dwc_csi_device_init(struct dwc_csi_device *csidev)
 {
-	struct device *dev = csidev->dev;
 	union phy_configure_opts opts;
-	u32 phy_stopstate;
-	u32 val;
 	int ret;
 
 	ret = dwc_csi_get_dphy_configuration(csidev, &opts);
@@ -710,18 +698,26 @@ static int dwc_csi_device_init(struct dwc_csi_device *csidev)
 	phy_power_on(csidev->phy);
 	dwc_csi_write(csidev, CSI2RX_HOST_RESETN, 0x1);
 
+	return 0;
+}
+
+static int dwc_csi_wait_for_phy_stopstate(struct dwc_csi_device *csidev)
+{
+	struct device *dev = csidev->dev;
+	u32 phy_stopstate;
+	u32 val;
+	int ret;
+
 	/* Check if lanes are in stop state */
 	phy_stopstate = CSI2RX_DPHY_STOPSTATE_CLK_LANE;
 	phy_stopstate |= GENMASK(csidev->bus.num_data_lanes - 1, 0);
 	ret = readl_poll_timeout(csidev->regs + CSI2RX_DPHY_STOPSTATE,
-				 val, (val & phy_stopstate) != phy_stopstate,
+				 val, (val & phy_stopstate) == phy_stopstate,
 				 10, 10000);
-	if (ret) {
+	if (ret)
 		dev_err(dev, "Lanes are not in stop state(%#x)\n", val);
-		return ret;
-	}
 
-	return 0;
+	return ret;
 }
 
 static void dwc_csi_device_hs_rx_start(struct dwc_csi_device *csidev)
@@ -755,31 +751,6 @@ static void dwc_csi_device_enable_interrupts(struct dwc_csi_device *csidev, bool
 	dwc_csi_write(csidev, CSI2RX_INT_MSK_PKT_FATAL, on ? 0x3 : 0);
 	dwc_csi_write(csidev, CSI2RX_INT_MSK_DPHY, on ? 0x30003 : 0);
 	dwc_csi_write(csidev, CSI2RX_INT_MSK_IPI_FATAL, on ? 0x7f : 0);
-}
-
-static int dwc_csi_clk_enable(struct dwc_csi_device *csidev)
-{
-	return clk_bulk_prepare_enable(DWC_NUM_CLKS, csidev->clks);
-}
-
-static void dwc_csi_clk_disable(struct dwc_csi_device *csidev)
-{
-	clk_bulk_disable_unprepare(DWC_NUM_CLKS, csidev->clks);
-}
-
-static int dwc_csi_clk_get(struct dwc_csi_device *csidev)
-{
-	int ret;
-
-	memcpy(csidev->clks, dwc_clks, sizeof(dwc_clks));
-
-	ret = devm_clk_bulk_get(csidev->dev, DWC_NUM_CLKS, csidev->clks);
-	if (ret < 0) {
-		dev_err(csidev->dev, "Failed to acquire clocks: %d\n", ret);
-		return ret;
-	}
-
-	return 0;
 }
 
 /* -----------------------------------------------------------------------------
@@ -894,7 +865,7 @@ static int __dwc_csi_subdev_set_routing(struct v4l2_subdev *sd,
 						&dwc_csi_default_fmt);
 }
 
-static int dwc_csi_subdev_init_cfg(struct v4l2_subdev *sd,
+static int dwc_csi_subdev_init_state(struct v4l2_subdev *sd,
 				     struct v4l2_subdev_state *sd_state)
 {
 	struct v4l2_subdev_route routes[] = {
@@ -929,8 +900,8 @@ static int dwc_csi_subdev_enum_mbus_code(struct v4l2_subdev *sd,
 		if (code->index > 0)
 			return -EINVAL;
 
-		fmt = v4l2_subdev_state_get_stream_format(sd_state, code->pad,
-							  code->stream);
+		fmt = v4l2_subdev_state_get_format(sd_state, code->pad,
+						   code->stream);
 		code->code = fmt->code;
 		return 0;
 	}
@@ -990,8 +961,8 @@ static int dwc_csi_subdev_set_fmt(struct v4l2_subdev *sd,
 			      &sdformat->format.height, 1,
 			      DWC_CSI2RX_MAX_PIX_HEIGHT, 0, 0);
 
-	fmt = v4l2_subdev_state_get_stream_format(sd_state, sdformat->pad,
-						  sdformat->stream);
+	fmt = v4l2_subdev_state_get_format(sd_state, sdformat->pad,
+					   sdformat->stream);
 	if (!fmt)
 		return -EINVAL;
 
@@ -1171,14 +1142,27 @@ static int dwc_csi_enable_streams(struct v4l2_subdev *sd,
 	ret = v4l2_subdev_enable_streams(csidev->source_sd, csidev->remote_pad,
 					 sink_streams);
 	if (ret)
-		return ret;
+		goto err_csi_stop;
+
+	if (!csidev->enabled_streams) {
+		ret = dwc_csi_wait_for_phy_stopstate(csidev);
+		if (ret)
+			goto err_disable_stream;
+	}
 
 	csidev->enabled_streams |= streams_mask;
 
 	return 0;
 
+err_disable_stream:
+	v4l2_subdev_disable_streams(csidev->source_sd, csidev->remote_pad,
+				    sink_streams);
+err_csi_stop:
+	if (!csidev->enabled_streams)
+		dwc_csi_stop_stream(csidev);
 err_runtime_put:
-	pm_runtime_put(csidev->dev);
+	if (!csidev->enabled_streams)
+		pm_runtime_put(csidev->dev);
 	return ret;
 }
 
@@ -1225,7 +1209,6 @@ static const struct v4l2_subdev_core_ops dwc_csi_subdev_core_ops = {
 };
 
 static const struct v4l2_subdev_pad_ops dwc_csi_subdev_pad_ops = {
-	.init_cfg = dwc_csi_subdev_init_cfg,
 	.enum_mbus_code	= dwc_csi_subdev_enum_mbus_code,
 	.get_fmt = v4l2_subdev_get_fmt,
 	.set_fmt = dwc_csi_subdev_set_fmt,
@@ -1238,6 +1221,10 @@ static const struct v4l2_subdev_pad_ops dwc_csi_subdev_pad_ops = {
 static const struct v4l2_subdev_ops dwc_csi_subdev_ops = {
 	.core  = &dwc_csi_subdev_core_ops,
 	.pad   = &dwc_csi_subdev_pad_ops,
+};
+
+static const struct v4l2_subdev_internal_ops dwc_csi_internal_ops = {
+	.init_state = dwc_csi_subdev_init_state,
 };
 
 /* -----------------------------------------------------------------------------
@@ -1486,7 +1473,7 @@ static int dwc_csi_runtime_suspend(struct device *dev)
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct dwc_csi_device *csidev = sd_to_dwc_csi_device(sd);
 
-	dwc_csi_clk_disable(csidev);
+	clk_bulk_disable_unprepare(csidev->num_clks, csidev->clks);
 
 	return 0;
 }
@@ -1497,7 +1484,7 @@ static int dwc_csi_runtime_resume(struct device *dev)
 	struct dwc_csi_device *csidev = sd_to_dwc_csi_device(sd);
 	int ret;
 
-	ret = dwc_csi_clk_enable(csidev);
+	ret = clk_bulk_prepare_enable(csidev->num_clks, csidev->clks);
 	if (ret < 0)
 		return ret;
 
@@ -1555,6 +1542,7 @@ static int dwc_csi_subdev_init(struct dwc_csi_device *csidev)
 	v4l2_subdev_init(sd, &dwc_csi_subdev_ops);
 	sd->owner = THIS_MODULE;
 	snprintf(sd->name, sizeof(sd->name), "csidev-%s", dev_name(csidev->dev));
+	sd->internal_ops = &dwc_csi_internal_ops;
 
 	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
 		     V4L2_SUBDEV_FL_HAS_EVENTS | V4L2_SUBDEV_FL_STREAMS;
@@ -1621,11 +1609,9 @@ static int dwc_csi_device_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	ret = dwc_csi_clk_get(csidev);
-	if (ret < 0) {
-		dev_err(dev, "Failed to get clocks\n");
-		return ret;
-	}
+	csidev->num_clks = devm_clk_bulk_get_all(dev, &csidev->clks);
+	if (csidev->num_clks < 0)
+		return dev_err_probe(dev, csidev->num_clks, "Failed to get clocks\n");
 
 	dwc_csi_param_init(csidev);
 
@@ -1662,7 +1648,7 @@ err_ent_cleanup:
 	return ret;
 }
 
-static int dwc_csi_device_remove(struct platform_device *pdev)
+static void dwc_csi_device_remove(struct platform_device *pdev)
 {
 	struct v4l2_subdev *sd = platform_get_drvdata(pdev);
 	struct dwc_csi_device *csidev = sd_to_dwc_csi_device(sd);
@@ -1680,7 +1666,6 @@ static int dwc_csi_device_remove(struct platform_device *pdev)
 	mutex_destroy(&csidev->lock);
 
 	pm_runtime_set_suspended(&pdev->dev);
-	return 0;
 }
 
 static const struct of_device_id dwc_csi_device_of_match[] = {

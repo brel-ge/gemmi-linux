@@ -152,7 +152,7 @@ static int i2c_rpmsg_cb(struct rpmsg_device *rpdev, void *data, int len,
 	}
 
 	/* Receive Success */
-	i2c_rpmsg.msg = msg;
+	*i2c_rpmsg.msg = *msg;
 
 	complete(&i2c_rpmsg.cmd_complete);
 
@@ -241,7 +241,7 @@ static int i2c_rpmsg_read(struct i2c_msg *msg, struct i2c_rpmsg_info *info,
 	return msg->len;
 }
 
-int i2c_rpmsg_write(struct i2c_msg *msg, struct i2c_rpmsg_info *info,
+static int i2c_rpmsg_write(struct i2c_msg *msg, struct i2c_rpmsg_info *info,
 						int bus_id, bool is_last)
 {
 	int i, ret;
@@ -395,13 +395,11 @@ static int i2c_rpbus_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int i2c_rpbus_remove(struct platform_device *pdev)
+static void i2c_rpbus_remove(struct platform_device *pdev)
 {
 	struct imx_rpmsg_i2c_data *rdata = platform_get_drvdata(pdev);
 
 	i2c_del_adapter(&rdata->adapter);
-
-	return 0;
 }
 
 static struct i2c_rpmsg_devtype_data i2c_rpmsg_devtype_data = {
@@ -451,6 +449,12 @@ static int i2c_rpmsg_probe(struct rpmsg_device *rpdev)
 
 	dev_info(&rpdev->dev, "new channel: 0x%x -> 0x%x!\n",
 		 rpdev->src, rpdev->dst);
+
+	i2c_rpmsg.msg = devm_kzalloc(&rpdev->dev,
+				     sizeof(struct i2c_rpmsg_msg),
+				     GFP_KERNEL);
+	if (!i2c_rpmsg.msg)
+		return -ENOMEM;
 
 	i2c_rpmsg.wq = create_singlethread_workqueue("rpmsg-i2c");
 	if (!i2c_rpmsg.wq) {

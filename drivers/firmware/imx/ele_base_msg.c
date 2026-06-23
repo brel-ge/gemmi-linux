@@ -9,6 +9,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/genalloc.h>
 #include <linux/firmware/imx/se_api.h>
+#include <linux/regulator/consumer.h>
 
 #include "ele_base_msg.h"
 #include "ele_common.h"
@@ -60,9 +61,11 @@ int ele_get_info(struct se_if_priv *priv, struct ele_dev_info *s_info)
 		goto exit;
 	}
 
-	ret = se_fill_cmd_msg_hdr(priv, (struct se_msg_hdr *)&tx_msg->header,
-				  ELE_GET_INFO_REQ, ELE_GET_INFO_REQ_MSG_SZ,
-				  true);
+	ret = se_fill_cmd_msg_hdr(priv,
+				      (struct se_msg_hdr *)&tx_msg->header,
+				      ELE_GET_INFO_REQ,
+				      ELE_GET_INFO_REQ_MSG_SZ,
+				      true);
 	if (ret)
 		goto exit;
 
@@ -88,7 +91,7 @@ int ele_get_info(struct se_if_priv *priv, struct ele_dev_info *s_info)
 exit:
 	if (priv->mem_pool)
 		gen_pool_free(priv->mem_pool,
-			      (u64)get_info_data,
+			      (u64) get_info_data,
 			      ELE_GET_INFO_BUFF_SZ);
 	else
 		dma_free_coherent(priv->dev,
@@ -134,8 +137,8 @@ int ele_ping(struct se_if_priv *priv)
 	}
 
 	ret = se_fill_cmd_msg_hdr(priv,
-				  (struct se_msg_hdr *)&tx_msg->header,
-				  ELE_PING_REQ, ELE_PING_REQ_SZ, true);
+				      (struct se_msg_hdr *)&tx_msg->header,
+				      ELE_PING_REQ, ELE_PING_REQ_SZ, true);
 	if (ret) {
 		dev_err(priv->dev, "Error: se_fill_cmd_msg_hdr failed.\n");
 		goto exit;
@@ -184,9 +187,9 @@ int ele_service_swap(struct se_if_priv *priv,
 	}
 
 	ret = se_fill_cmd_msg_hdr(priv,
-				  (struct se_msg_hdr *)&tx_msg->header,
-				  ELE_SERVICE_SWAP_REQ,
-				  ELE_SERVICE_SWAP_REQ_MSG_SZ, true);
+				      (struct se_msg_hdr *)&tx_msg->header,
+				      ELE_SERVICE_SWAP_REQ,
+				      ELE_SERVICE_SWAP_REQ_MSG_SZ, true);
 	if (ret)
 		goto exit;
 
@@ -195,8 +198,7 @@ int ele_service_swap(struct se_if_priv *priv,
 	tx_msg->data[2] = ELE_NONE_VAL;
 	tx_msg->data[3] = lower_32_bits(addr);
 	tx_msg->data[4] = se_add_msg_crc((uint32_t *)&tx_msg[0],
-					 ELE_SERVICE_SWAP_REQ_MSG_SZ);
-
+						 ELE_SERVICE_SWAP_REQ_MSG_SZ);
 	ret = ele_msg_send_rcv(priv->priv_dev_ctx,
 			       tx_msg,
 			       ELE_SERVICE_SWAP_REQ_MSG_SZ,
@@ -461,7 +463,7 @@ exit:
 	return ret;
 }
 
-int ele_write_fuse(struct se_if_priv *priv, u16 fuse_index,
+int ele_write_fuse(struct se_if_priv *priv, uint16_t fuse_index,
 		   u32 value, bool block)
 {
 	struct se_api_msg *tx_msg __free(kfree) = NULL;
@@ -519,7 +521,7 @@ exit:
 /**
  * imx_se_write_fuse() - API to request SE-FW to write to fuses.
  * @void *se_if_data: refs to data attached to the se interface.
- * @u16 fuse_index: Fuse identifier to write to.
+ * @uint16_t fuse_index: Fuse identifier to write to.
  * @u32 value: unsigned integer value that to be written to the fuse.
  * @bool block: Flag to check if it is a block.
  *
@@ -533,7 +535,8 @@ exit:
  *   0,   means success.
  *   < 0, means failure.
  */
-int imx_se_write_fuse(void *se_if_data, u16 fuse_index, u32 value, bool block)
+int imx_se_write_fuse(void *se_if_data, uint16_t fuse_index,
+		   u32 value, bool block)
 {
 	return ele_write_fuse((struct se_if_priv *)se_if_data, fuse_index,
 				value, block);
@@ -541,12 +544,13 @@ int imx_se_write_fuse(void *se_if_data, u16 fuse_index, u32 value, bool block)
 EXPORT_SYMBOL_GPL(imx_se_write_fuse);
 
 int read_common_fuse(struct se_if_priv *priv,
-		     u16 fuse_id, u32 *value)
+		     uint16_t fuse_id, u32 *value)
 {
 	struct se_api_msg *tx_msg __free(kfree) = NULL;
 	struct se_api_msg *rx_msg __free(kfree) = NULL;
-	int rx_msg_sz = ELE_READ_FUSE_RSP_MSG_SZ;
+	int rx_msg_sz = ELE_READ_FUSE_RSP_MSG_SZ_CRC;
 	int ret = 0;
+	u32 soc_id;
 
 	if (!priv) {
 		ret = -EINVAL;
@@ -559,8 +563,23 @@ int read_common_fuse(struct se_if_priv *priv,
 		goto exit;
 	}
 
-	if (fuse_id == OTP_UNIQ_ID)
+	if ((get_ele_fw_vers_word() & ELE_FW_VERSION_MASK) < ELE_FW_VERSION_2_0_6) {
+		rx_msg_sz = ELE_READ_FUSE_RSP_MSG_SZ;
+	/* Firmware version >= 2.0.6 */
+	} else {
+		soc_id = get_se_soc_id(priv);
+
+		/* i.MX8ULP/93/91 platforms */
+		if (soc_id == SOC_ID_OF_IMX93 ||
+		    soc_id == SOC_ID_OF_IMX91 ||
+		    soc_id == SOC_ID_OF_IMX8ULP)
+			rx_msg_sz = ELE_READ_FUSE_RSP_MSG_SZ;
+	}
+
+	/* OTP_UNIQ_ID is only used on i.MX8ULP platform */
+	if (fuse_id == OTP_UNIQ_ID && soc_id == SOC_ID_OF_IMX8ULP) {
 		rx_msg_sz = ELE_READ_FUSE_OTP_UNQ_ID_RSP_MSG_SZ;
+	}
 
 	rx_msg = kzalloc(rx_msg_sz, GFP_KERNEL);
 	if (!rx_msg) {
@@ -613,7 +632,7 @@ exit:
 /**
  * imx_se_read_fuse() - API to request SE-FW to read the fuse(s) value.
  * @void *se_if_data: refs to data attached to the se interface.
- * @u16 fuse_id: Fuse identifier to read.
+ * @uint16_t fuse_id: Fuse identifier to read.
  * @u32 *value: unsigned integer array to store the fused-values.
  *
  * Secure-enclave like EdgeLock Enclave, manages the fuse. This API
@@ -627,17 +646,17 @@ exit:
  *   < 0, means failure.
  */
 int imx_se_read_fuse(void *se_if_data,
-		     u16 fuse_id, u32 *value)
+		     uint16_t fuse_id, u32 *value)
 {
 	return read_common_fuse((struct se_if_priv *)se_if_data, fuse_id, value);
 }
 EXPORT_SYMBOL_GPL(imx_se_read_fuse);
 
-int ele_voltage_change_req(struct se_if_priv *priv, bool start)
+int ele_voltage_change_req(struct se_if_priv *priv, bool start, bool enforce_fl_ctrl)
 {
 	struct se_api_msg *tx_msg __free(kfree) = NULL;
 	struct se_api_msg *rx_msg __free(kfree) = NULL;
-	u8 cmd = start ? ELE_VOLT_CHANGE_START_REQ : ELE_VOLT_CHANGE_FINISH_REQ;
+	uint8_t cmd = start ? ELE_VOLT_CHANGE_START_REQ : ELE_VOLT_CHANGE_FINISH_REQ;
 	int ret = 0;
 
 	if (!priv) {
@@ -665,8 +684,9 @@ int ele_voltage_change_req(struct se_if_priv *priv, bool start)
 	if (ret)
 		goto exit;
 
-	se_continue_to_enforce_msg_seq_flow(&priv->se_msg_sq_ctl,
-					    tx_msg);
+	if (enforce_fl_ctrl)
+		se_continue_to_enforce_msg_seq_flow(&priv->se_msg_sq_ctl,
+						    tx_msg);
 
 	ret = ele_msg_send_rcv(priv->priv_dev_ctx,
 			       tx_msg,
@@ -701,18 +721,26 @@ exit:
  *   0,   means success.
  *   < 0, means failure.
  */
-int imx_se_voltage_change_req(void *se_if_data, bool start)
+int imx_se_voltage_change_req(void *se_if_data, void *regulator_soc_reg, int new_uV, int tol_uV)
 {
+	struct regulator *soc_reg = regulator_soc_reg;
 	struct se_if_priv *priv = se_if_data;
 	int ret;
 
-	if (start)
-		se_start_enforce_msg_seq_flow(&priv->se_msg_sq_ctl);
+	se_start_enforce_msg_seq_flow(&priv->se_msg_sq_ctl);
 
-	ret = ele_voltage_change_req(priv, start);
-
-	if (!start)
+	ret = ele_voltage_change_req(priv, true, true);
+	if (ret) {
 		se_halt_to_enforce_msg_seq_flow(&priv->se_msg_sq_ctl);
+		return -EINVAL;
+	}
+
+	regulator_set_voltage_tol(soc_reg, new_uV, tol_uV);
+	ret = ele_voltage_change_req(priv, false, true);
+	if (ret)
+		ret = -EINVAL;
+
+	se_halt_to_enforce_msg_seq_flow(&priv->se_msg_sq_ctl);
 
 	return ret;
 }

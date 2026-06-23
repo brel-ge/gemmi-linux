@@ -7,12 +7,13 @@
 #define ENETC_DRV_NAME_STR "ENETC VF driver"
 
 /* Messaging */
-/* Notice this function needs to be called after filling the message body,
- * because CRC16 needs to be calculated here.
+/* Note: This function should be called after filling the message body,
+ * because the CRC16 needs to be calculated after all the data has been
+ * filled.
  */
-static void enetc_msg_vf_fill_common_header(struct enetc_msg_swbd *msg_swbd,
-					    u8 class_id, u8 cmd_id, u8 proto_ver,
-					    u8 cookie)
+static void enetc_msg_vsi_fill_cmn_hdr(struct enetc_msg_swbd *msg_swbd,
+				       u8 class_id, u8 cmd_id, u8 proto_ver,
+				       u8 cookie)
 {
 	struct enetc_msg_header *hdr = msg_swbd->vaddr;
 	u8 *data_buf = ((u8 *)msg_swbd->vaddr) + 2; /* skip crc16 field */
@@ -44,12 +45,14 @@ static int enetc_msg_vsi_send(struct enetc_si *si, struct enetc_msg_swbd *msg)
 	u32 vsimsgsr;
 	int err;
 
-	scoped_guard(mutex, &si->msg_lock) {
-		enetc_msg_vsi_write_msg(&si->hw, msg);
-		err = read_poll_timeout(enetc_rd, vsimsgsr,
-					!(vsimsgsr & ENETC_VSIMSGSR_MB),
-					100, 100000, false, &si->hw, ENETC_VSIMSGSR);
-	}
+	mutex_lock(&si->msg_lock);
+
+	enetc_msg_vsi_write_msg(&si->hw, msg);
+	err = read_poll_timeout(enetc_rd, vsimsgsr,
+				!(vsimsgsr & ENETC_VSIMSGSR_MB),
+				100, 100000, false, &si->hw, ENETC_VSIMSGSR);
+
+	mutex_unlock(&si->msg_lock);
 
 	if (err) {
 		dev_err(dev, "VSI to PSI message timeout.\n");
@@ -78,16 +81,13 @@ static int enetc_msg_vsi_send(struct enetc_si *si, struct enetc_msg_swbd *msg)
 			err = -ETIME;
 			break;
 		case ENETC_MSG_CLASS_ID_MAC_FILTER:
-			if (pf_msg.class_code == ENETC_PF_RC_MAC_FILTER_NO_RESOURCE)
-				return -ENOSPC;
-
 			err = -EINVAL;
 			break;
-		case ENETC_MSG_CLASS_ID_VLAN_FILTER:
-			if (pf_msg.class_code == ENETC_PF_RC_VLAN_FILTER_NO_RESOURCE)
-				return -ENOSPC;
-
-			err = -EINVAL;
+		case ENETC_MSG_CLASS_ID_IP_REVISION:
+			if (pf_msg.class_code_u8 == ENETC_PF_RC_IP_REVISION_INVALID)
+				err = -EINVAL;
+			else
+				msg->class_code = pf_msg.class_code_u8;
 			break;
 		default:
 			err = -EIO;
@@ -103,8 +103,8 @@ static int enetc_msg_vsi_send(struct enetc_si *si, struct enetc_msg_swbd *msg)
 static int enetc_msg_vf_register_link_status_notify(struct enetc_si *si, bool notify)
 {
 	struct device *dev = &si->pdev->dev;
-	struct enetc_msg_link_status *msg;
 	struct enetc_msg_swbd msg_swbd;
+	struct enetc_msg_generic *msg;
 	u8 cmd_id;
 	int err;
 
@@ -116,8 +116,8 @@ static int enetc_msg_vf_register_link_status_notify(struct enetc_si *si, bool no
 
 	cmd_id = notify ? ENETC_MSG_REGISTER_LINK_CHANGE_NOTIFY :
 			  ENETC_MSG_UNREGISTER_LINK_CHANGE_NOTIFY;
-	enetc_msg_vf_fill_common_header(&msg_swbd, ENETC_MSG_CLASS_ID_LINK_STATUS,
-					cmd_id, 0, 0);
+	enetc_msg_vsi_fill_cmn_hdr(&msg_swbd, ENETC_MSG_CLASS_ID_LINK_STATUS,
+				   cmd_id, 0, 0);
 
 	/* send the command and wait */
 	err = enetc_msg_vsi_send(si, &msg_swbd);
@@ -127,8 +127,8 @@ static int enetc_msg_vf_register_link_status_notify(struct enetc_si *si, bool no
 	return err;
 }
 
-static int enetc_msg_vf_set_primary_mac_addr(struct enetc_ndev_priv *priv,
-					     struct sockaddr *saddr)
+static int enetc_msg_vsi_set_primary_mac_addr(struct enetc_ndev_priv *priv,
+					      struct sockaddr *saddr)
 {
 	struct enetc_msg_mac_exact_filter *msg;
 	struct enetc_msg_swbd msg_swbd;
@@ -139,18 +139,14 @@ static int enetc_msg_vf_set_primary_mac_addr(struct enetc_ndev_priv *priv,
 	msg_swbd.size = ALIGN(msg_size, ENETC_MSG_ALIGN);
 	msg_swbd.vaddr = dma_alloc_coherent(priv->dev, msg_swbd.size,
 					    &msg_swbd.dma, GFP_KERNEL);
-	if (!msg_swbd.vaddr) {
-		dev_err(priv->dev,
-			"Failed to alloc Tx msg (size: %d) for primary MAC\n",
-			msg_swbd.size);
+	if (!msg_swbd.vaddr)
 		return -ENOMEM;
-	}
 
 	msg = (struct enetc_msg_mac_exact_filter *)msg_swbd.vaddr;
 	msg->mac_cnt = 1;
 	memcpy(&msg->mac[0].addr, saddr->sa_data, ETH_ALEN);
-	enetc_msg_vf_fill_common_header(&msg_swbd, ENETC_MSG_CLASS_ID_MAC_FILTER,
-					ENETC_MSG_SET_PRIMARY_MAC, 0, 0);
+	enetc_msg_vsi_fill_cmn_hdr(&msg_swbd, ENETC_MSG_CLASS_ID_MAC_FILTER,
+				   ENETC_MSG_SET_PRIMARY_MAC, 0, 0);
 
 	/* send the command and wait */
 	err = enetc_msg_vsi_send(priv->si, &msg_swbd);
@@ -158,6 +154,27 @@ static int enetc_msg_vf_set_primary_mac_addr(struct enetc_ndev_priv *priv,
 	dma_free_coherent(priv->dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
 
 	return err;
+}
+
+static u8 enetc_msg_vsi_get_ip_minor_revision(struct enetc_si *si)
+{
+	struct device *dev = &si->pdev->dev;
+	struct enetc_msg_swbd msg_swbd;
+	int err;
+
+	msg_swbd.size = ALIGN(sizeof(struct enetc_msg_generic), ENETC_MSG_ALIGN);
+	msg_swbd.vaddr = dma_alloc_coherent(dev, msg_swbd.size, &msg_swbd.dma,
+					    GFP_KERNEL);
+	if (!msg_swbd.vaddr)
+		return ENETC_PF_RC_IP_REVISION_INVALID;
+
+	enetc_msg_vsi_fill_cmn_hdr(&msg_swbd, ENETC_MSG_CLASS_ID_IP_REVISION,
+				   ENETC_MSG_GET_IP_MN, 0, 0);
+
+	err = enetc_msg_vsi_send(si, &msg_swbd);
+	dma_free_coherent(dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
+
+	return err ? ENETC_PF_RC_IP_REVISION_INVALID : msg_swbd.class_code;
 }
 
 static int enetc_vf_set_mac_addr(struct net_device *ndev, void *addr)
@@ -169,280 +186,13 @@ static int enetc_vf_set_mac_addr(struct net_device *ndev, void *addr)
 	if (!is_valid_ether_addr(saddr->sa_data))
 		return -EADDRNOTAVAIL;
 
-	err = enetc_msg_vf_set_primary_mac_addr(priv, saddr);
-	if (!err)
-		eth_hw_addr_set(ndev, saddr->sa_data);
+	err = enetc_msg_vsi_set_primary_mac_addr(priv, saddr);
+	if (err)
+		return err;
 
-	return err;
-}
+	eth_hw_addr_set(ndev, saddr->sa_data);
 
-static void enetc_msg_vf_set_mac_promisc(struct enetc_ndev_priv *priv,
-					 int type, bool en)
-{
-	struct enetc_msg_mac_promsic_mode *msg;
-	struct enetc_msg_swbd msg_swbd;
-
-	if (!(type & ENETC_MAC_FILTER_TYPE_ALL))
-		return;
-
-	msg_swbd.size = ALIGN(sizeof(*msg), ENETC_MSG_ALIGN);
-	msg_swbd.vaddr = dma_alloc_coherent(priv->dev, msg_swbd.size,
-					    &msg_swbd.dma, GFP_KERNEL);
-	if (!msg_swbd.vaddr)
-		return;
-
-	msg = (struct enetc_msg_mac_promsic_mode *)msg_swbd.vaddr;
-	msg->type = type & ENETC_MAC_FILTER_TYPE_ALL;
-	msg->promisc_mode = en ? ENETC_MAC_PROMISC_MODE_ENABLE :
-				 ENETC_MAC_PROMISC_MODE_DISABLE;
-	/* Delete MAC exact filter and hash filter by default */
-	msg->flush_macs = en ? ENETC_MAC_FILTER_FLUSH : 0;
-	enetc_msg_vf_fill_common_header(&msg_swbd, ENETC_MSG_CLASS_ID_MAC_FILTER,
-					ENETC_MSG_SET_MAC_PROMISC_MODE, 0, 0);
-
-	/* send the command and wait */
-	enetc_msg_vsi_send(priv->si, &msg_swbd);
-
-	dma_free_coherent(priv->dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
-}
-
-static int enetc_msg_vf_flush_mac_filter(struct net_device *ndev, int type)
-{
-	struct enetc_ndev_priv *priv = netdev_priv(ndev);
-	struct enetc_msg_mac_filter_flush *msg;
-	struct enetc_msg_swbd msg_swbd;
-	int err;
-
-	msg_swbd.size = ALIGN(sizeof(*msg), ENETC_MSG_ALIGN);
-	msg_swbd.vaddr = dma_alloc_coherent(priv->dev, msg_swbd.size,
-					    &msg_swbd.dma, GFP_KERNEL);
-	if (!msg_swbd.vaddr)
-		return -ENOMEM;
-
-	msg = (struct enetc_msg_mac_filter_flush *)msg_swbd.vaddr;
-	msg->type = type & ENETC_MAC_FILTER_TYPE_ALL;
-	enetc_msg_vf_fill_common_header(&msg_swbd, ENETC_MSG_CLASS_ID_MAC_FILTER,
-					ENETC_MSG_FLUSH_MAC_ENTRIES, 0, 0);
-
-	/* send the command and wait */
-	err = enetc_msg_vsi_send(priv->si, &msg_swbd);
-
-	dma_free_coherent(priv->dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
-
-	return err;
-}
-
-static int enetc_msg_vf_set_mac_exact_filter(struct net_device *ndev, int type)
-{
-	struct enetc_ndev_priv *priv = netdev_priv(ndev);
-	struct enetc_msg_mac_exact_filter *msg;
-	struct enetc_msg_swbd msg_swbd;
-	struct netdev_hw_addr *ha;
-	u8 si_mac[ETH_ALEN];
-	int mac_cnt = 0;
-	u32 msg_size;
-	int err;
-
-	enetc_get_si_primary_mac(&priv->si->hw, si_mac);
-
-	netif_addr_lock_bh(ndev);
-	if (type & ENETC_MAC_FILTER_TYPE_UC)
-		mac_cnt += netdev_uc_count(ndev);
-
-	if (type & ENETC_MAC_FILTER_TYPE_MC)
-		mac_cnt += netdev_mc_count(ndev);
-
-	msg_size = struct_size(msg, mac, mac_cnt);
-	if (msg_size > ENETC_1KB_SIZE) {
-		netif_addr_unlock_bh(ndev);
-		return -EOPNOTSUPP;
-	}
-
-	msg_swbd.size = ALIGN(msg_size, ENETC_MSG_ALIGN);
-	msg_swbd.vaddr = dma_alloc_coherent(priv->dev, msg_swbd.size,
-					    &msg_swbd.dma, GFP_ATOMIC);
-	if (!msg_swbd.vaddr) {
-		netif_addr_unlock_bh(ndev);
-		return -ENOMEM;
-	}
-
-	mac_cnt = 0;
-	msg = (struct enetc_msg_mac_exact_filter *)msg_swbd.vaddr;
-
-	if (type & ENETC_MAC_FILTER_TYPE_UC) {
-		netdev_for_each_uc_addr(ha, ndev) {
-			if (!is_valid_ether_addr(ha->addr) ||
-			    ether_addr_equal(ha->addr, si_mac))
-				continue;
-
-			ether_addr_copy(msg->mac[mac_cnt++].addr, ha->addr);
-		}
-	}
-
-	if (type & ENETC_MAC_FILTER_TYPE_MC) {
-		netdev_for_each_mc_addr(ha, ndev) {
-			if (!is_multicast_ether_addr(ha->addr))
-				continue;
-
-			ether_addr_copy(msg->mac[mac_cnt++].addr, ha->addr);
-		}
-	}
-	netif_addr_unlock_bh(ndev);
-
-	msg->mac_cnt = mac_cnt;
-	enetc_msg_vf_fill_common_header(&msg_swbd, ENETC_MSG_CLASS_ID_MAC_FILTER,
-					ENETC_MSG_ADD_EXACT_MAC_ENTRIES, 0, 0);
-
-	/* send the command and wait */
-	err = enetc_msg_vsi_send(priv->si, &msg_swbd);
-
-	dma_free_coherent(priv->dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
-
-	return err;
-}
-
-static int enetc_msg_vf_set_mac_hash_filter(struct net_device *ndev,
-					    int type, bool clear)
-{
-	struct enetc_ndev_priv *priv = netdev_priv(ndev);
-	struct enetc_msg_mac_hash_filter *msg;
-	struct enetc_mac_filter *mac_filter;
-	struct enetc_msg_swbd msg_swbd;
-	struct enetc_si *si = priv->si;
-	struct netdev_hw_addr *ha;
-	u32 msg_size, tbl_size;
-	u64 *hash_tbl_base;
-	int err;
-
-	if (type == ENETC_MAC_FILTER_TYPE_ALL)
-		tbl_size = ENETC_MADDR_HASH_TBL_SZ * 2;
-	else
-		tbl_size = ENETC_MADDR_HASH_TBL_SZ;
-
-	msg_size = struct_size(msg, hash_tbl, tbl_size / 32);
-	msg_swbd.size = ALIGN(msg_size, ENETC_MSG_ALIGN);
-	msg_swbd.vaddr = dma_alloc_coherent(priv->dev, msg_swbd.size,
-					    &msg_swbd.dma, GFP_KERNEL);
-	if (!msg_swbd.vaddr)
-		return -ENOMEM;
-
-	msg = (struct enetc_msg_mac_hash_filter *)msg_swbd.vaddr;
-	msg->type = type & ENETC_MAC_FILTER_TYPE_ALL;
-	msg->size = ENETC_MAC_HASH_TABLE_SIZE_64;
-
-	hash_tbl_base = (u64 *)msg->hash_tbl;
-	netif_addr_lock_bh(ndev);
-	if (type & ENETC_MAC_FILTER_TYPE_UC) {
-		if (clear) {
-			*hash_tbl_base = 0;
-		} else {
-			mac_filter = &si->mac_filter[UC];
-			enetc_reset_mac_addr_filter(mac_filter);
-			netdev_for_each_uc_addr(ha, ndev)
-				enetc_add_mac_addr_ht_filter(mac_filter, ha->addr);
-
-			memcpy(hash_tbl_base, mac_filter->mac_hash_table,
-			       sizeof(mac_filter->mac_hash_table));
-		}
-
-		hash_tbl_base++;
-	}
-
-	if (type & ENETC_MAC_FILTER_TYPE_MC) {
-		if (clear) {
-			*hash_tbl_base = 0;
-		} else {
-			mac_filter = &si->mac_filter[MC];
-			enetc_reset_mac_addr_filter(mac_filter);
-			netdev_for_each_mc_addr(ha, ndev)
-				enetc_add_mac_addr_ht_filter(mac_filter, ha->addr);
-
-			memcpy(hash_tbl_base, mac_filter->mac_hash_table,
-			       sizeof(mac_filter->mac_hash_table));
-		}
-	}
-	netif_addr_unlock_bh(ndev);
-
-	enetc_msg_vf_fill_common_header(&msg_swbd, ENETC_MSG_CLASS_ID_MAC_FILTER,
-					ENETC_MSG_SET_MAC_HASH_TABLE, 0, 0);
-
-	/* send the command and wait */
-	err = enetc_msg_vsi_send(si, &msg_swbd);
-
-	dma_free_coherent(priv->dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
-
-	return err;
-}
-
-static void enetc_vf_set_mac_filter(struct net_device *ndev, int type)
-{
-	if (!(type & ENETC_MAC_FILTER_TYPE_ALL))
-		return;
-
-	enetc_msg_vf_flush_mac_filter(ndev, type);
-	if (enetc_msg_vf_set_mac_exact_filter(ndev, type))
-		/* Fallback to use MAC hash filter */
-		enetc_msg_vf_set_mac_hash_filter(ndev, type, false);
-}
-
-static void enetc_vf_do_set_rx_mode(struct work_struct *work)
-{
-	struct enetc_si *si = container_of(work, struct enetc_si, rx_mode_task);
-	struct enetc_ndev_priv *priv = netdev_priv(si->ndev);
-	struct net_device *ndev = si->ndev;
-
-	if (ndev->flags & IFF_PROMISC) {
-		enetc_msg_vf_set_mac_promisc(priv, ENETC_MAC_FILTER_TYPE_ALL, true);
-	} else if (ndev->flags & IFF_ALLMULTI) {
-		enetc_msg_vf_set_mac_promisc(priv, ENETC_MAC_FILTER_TYPE_MC, true);
-		enetc_msg_vf_set_mac_promisc(priv, ENETC_MAC_FILTER_TYPE_UC, false);
-		enetc_vf_set_mac_filter(ndev, ENETC_MAC_FILTER_TYPE_UC);
-	} else {
-		enetc_msg_vf_set_mac_promisc(priv, ENETC_MAC_FILTER_TYPE_ALL, false);
-		enetc_vf_set_mac_filter(ndev, ENETC_MAC_FILTER_TYPE_ALL);
-	}
-}
-
-static void enetc_vf_set_rx_mode(struct net_device *ndev)
-{
-	struct enetc_ndev_priv *priv = netdev_priv(ndev);
-	struct enetc_si *si = priv->si;
-
-	if (is_enetc_rev1(si))
-		return;
-
-	queue_work(si->workqueue, &si->rx_mode_task);
-}
-
-static int enetc_msg_vf_set_vlan_hash_filter(struct enetc_ndev_priv *priv)
-{
-	struct enetc_msg_vlan_hash_filter *msg;
-	struct enetc_msg_swbd msg_swbd;
-	struct enetc_si *si = priv->si;
-	u32 msg_size;
-	int err;
-
-	msg_size = struct_size(msg, hash_tbl, ENETC_VLAN_HT_SIZE / 32);
-	msg_swbd.size = ALIGN(msg_size, ENETC_MSG_ALIGN);
-	msg_swbd.vaddr = dma_alloc_coherent(priv->dev, msg_swbd.size,
-					    &msg_swbd.dma, GFP_KERNEL);
-	if (!msg_swbd.vaddr)
-		return -ENOMEM;
-
-	msg = (struct enetc_msg_vlan_hash_filter *)msg_swbd.vaddr;
-	msg->size = ENETC_VLAN_HASH_TABLE_SIZE_64;
-
-	memcpy(msg->hash_tbl, si->vlan_ht_filter, sizeof(si->vlan_ht_filter));
-
-	enetc_msg_vf_fill_common_header(&msg_swbd, ENETC_MSG_CLASS_ID_VLAN_FILTER,
-					ENETC_MSG_SET_VLAN_HASH_TABLE, 0, 0);
-
-	/* send the command and wait */
-	err = enetc_msg_vsi_send(si, &msg_swbd);
-
-	dma_free_coherent(priv->dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
-
-	return err;
+	return 0;
 }
 
 static int enetc_msg_vf_set_vlan_promisc(struct enetc_ndev_priv *priv, bool en)
@@ -461,62 +211,13 @@ static int enetc_msg_vf_set_vlan_promisc(struct enetc_ndev_priv *priv, bool en)
 	msg = (struct enetc_msg_vlan_promsic_mode *)msg_swbd.vaddr;
 	msg->promisc_mode = en ? ENETC_VLAN_PROMISC_MODE_ENABLE :
 				 ENETC_VLAN_PROMISC_MODE_DISABLE;
-	enetc_msg_vf_fill_common_header(&msg_swbd, ENETC_MSG_CLASS_ID_VLAN_FILTER,
-					ENETC_MSG_SET_VLAN_PROMISC_MODE, 0, 0);
+	enetc_msg_vsi_fill_cmn_hdr(&msg_swbd, ENETC_MSG_CLASS_ID_VLAN_FILTER,
+				   ENETC_MSG_SET_VLAN_PROMISC_MODE, 0, 0);
 
 	/* send the command and wait */
 	err = enetc_msg_vsi_send(si, &msg_swbd);
 
 	dma_free_coherent(priv->dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
-
-	return err;
-}
-
-static int enetc_vf_vlan_rx_add_vid(struct net_device *ndev,
-				    __be16 prot, u16 vid)
-{
-	struct enetc_ndev_priv *priv = netdev_priv(ndev);
-	struct enetc_si *si = priv->si;
-	int idx, err = 0;
-
-	if (is_enetc_rev1(si))
-		return -EOPNOTSUPP;
-
-	__set_bit(vid, si->active_vlans);
-
-	idx = enetc_vid_hash_idx(vid);
-	if (!__test_and_set_bit(idx, si->vlan_ht_filter))
-		err = enetc_msg_vf_set_vlan_hash_filter(priv);
-
-	if (err) {
-		__clear_bit(idx, si->vlan_ht_filter);
-		__clear_bit(vid, si->active_vlans);
-	}
-
-	return err;
-}
-
-static int enetc_vf_vlan_rx_del_vid(struct net_device *ndev,
-				    __be16 prot, u16 vid)
-{
-	struct enetc_ndev_priv *priv = netdev_priv(ndev);
-	struct enetc_si *si = priv->si;
-	int idx, err = 0;
-
-	if (is_enetc_rev1(si))
-		return -EOPNOTSUPP;
-
-	if (__test_and_clear_bit(vid, si->active_vlans)) {
-		idx = enetc_vid_hash_idx(vid);
-		enetc_refresh_vlan_ht_filter(si);
-		if (!test_bit(idx, si->vlan_ht_filter))
-			err = enetc_msg_vf_set_vlan_hash_filter(priv);
-
-		if (err) {
-			__set_bit(idx, si->vlan_ht_filter);
-			__set_bit(vid, si->active_vlans);
-		}
-	}
 
 	return err;
 }
@@ -550,6 +251,207 @@ static int enetc_vf_setup_tc(struct net_device *ndev, enum tc_setup_type type,
 	}
 }
 
+static void enetc_msg_vf_set_mac_promisc(struct enetc_ndev_priv *priv,
+					 int type, bool en)
+{
+	struct enetc_msg_mac_promsic_mode *msg;
+	struct enetc_msg_swbd msg_swbd;
+
+	if (!(type & ENETC_MAC_FILTER_TYPE_ALL))
+		return;
+
+	msg_swbd.size = ALIGN(sizeof(*msg), ENETC_MSG_ALIGN);
+	msg_swbd.vaddr = dma_alloc_coherent(priv->dev, msg_swbd.size,
+					    &msg_swbd.dma, GFP_KERNEL);
+	if (!msg_swbd.vaddr)
+		return;
+
+	msg = (struct enetc_msg_mac_promsic_mode *)msg_swbd.vaddr;
+	msg->type = type & ENETC_MAC_FILTER_TYPE_ALL;
+	msg->promisc_mode = en ? ENETC_MAC_PROMISC_MODE_ENABLE :
+				 ENETC_MAC_PROMISC_MODE_DISABLE;
+	msg->flush_macs = en ? ENETC_MAC_FILTER_FLUSH : 0;
+	enetc_msg_vsi_fill_cmn_hdr(&msg_swbd, ENETC_MSG_CLASS_ID_MAC_FILTER,
+				   ENETC_MSG_SET_MAC_PROMISC_MODE, 0, 0);
+
+	/* send the command and wait */
+	enetc_msg_vsi_send(priv->si, &msg_swbd);
+
+	dma_free_coherent(priv->dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
+}
+
+static int enetc_msg_vf_set_mac_hash_filter(struct net_device *ndev, int type)
+{
+	struct enetc_ndev_priv *priv = netdev_priv(ndev);
+	struct enetc_msg_mac_hash_filter *msg;
+	struct enetc_mac_filter *mac_filter;
+	struct enetc_msg_swbd msg_swbd;
+	struct enetc_si *si = priv->si;
+	struct netdev_hw_addr *ha;
+	u32 msg_size, tbl_cnt;
+	u64 *hash_tbl_base;
+	int err;
+
+	tbl_cnt = (type == ENETC_MAC_FILTER_TYPE_ALL) ? 2 : 1;
+
+	msg_size = struct_size(msg, hash_tbl, tbl_cnt);
+	msg_swbd.size = ALIGN(msg_size, ENETC_MSG_ALIGN);
+	msg_swbd.vaddr = dma_alloc_coherent(priv->dev, msg_swbd.size,
+					    &msg_swbd.dma, GFP_KERNEL);
+	if (!msg_swbd.vaddr)
+		return -ENOMEM;
+
+	msg = (struct enetc_msg_mac_hash_filter *)msg_swbd.vaddr;
+	msg->type = type & ENETC_MAC_FILTER_TYPE_ALL;
+	msg->size = ENETC_MAC_HASH_TABLE_SIZE_64;
+
+	hash_tbl_base = msg->hash_tbl;
+	netif_addr_lock_bh(ndev);
+	if (type & ENETC_MAC_FILTER_TYPE_UC) {
+		mac_filter = &si->mac_filter[UC];
+		enetc_reset_mac_addr_filter(mac_filter);
+		netdev_for_each_uc_addr(ha, ndev)
+			enetc_add_mac_addr_ht_filter(mac_filter, ha->addr);
+
+		memcpy(hash_tbl_base, mac_filter->mac_hash_table,
+		       sizeof(*hash_tbl_base));
+
+		hash_tbl_base++;
+	}
+
+	if (type & ENETC_MAC_FILTER_TYPE_MC) {
+		mac_filter = &si->mac_filter[MC];
+		enetc_reset_mac_addr_filter(mac_filter);
+		netdev_for_each_mc_addr(ha, ndev)
+			enetc_add_mac_addr_ht_filter(mac_filter, ha->addr);
+
+		memcpy(hash_tbl_base, mac_filter->mac_hash_table,
+		       sizeof(*hash_tbl_base));
+	}
+	netif_addr_unlock_bh(ndev);
+
+	enetc_msg_vsi_fill_cmn_hdr(&msg_swbd, ENETC_MSG_CLASS_ID_MAC_FILTER,
+				   ENETC_MSG_SET_MAC_HASH_TABLE, 0, 0);
+
+	/* send the command and wait */
+	err = enetc_msg_vsi_send(si, &msg_swbd);
+
+	dma_free_coherent(priv->dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
+
+	return err;
+}
+
+static void enetc_vf_do_set_rx_mode(struct work_struct *work)
+{
+	struct enetc_si *si = container_of(work, struct enetc_si, rx_mode_task);
+	struct enetc_ndev_priv *priv = netdev_priv(si->ndev);
+	struct net_device *ndev = si->ndev;
+
+	rtnl_lock();
+
+	if (unlikely(test_bit(ENETC_SUSPEND, &priv->flags)))
+		goto out;
+
+	if (ndev->flags & IFF_PROMISC) {
+		enetc_msg_vf_set_mac_promisc(priv, ENETC_MAC_FILTER_TYPE_ALL, true);
+	} else if (ndev->flags & IFF_ALLMULTI) {
+		enetc_msg_vf_set_mac_promisc(priv, ENETC_MAC_FILTER_TYPE_MC, true);
+		enetc_msg_vf_set_mac_promisc(priv, ENETC_MAC_FILTER_TYPE_UC, false);
+		enetc_msg_vf_set_mac_hash_filter(ndev, ENETC_MAC_FILTER_TYPE_UC);
+	} else {
+		enetc_msg_vf_set_mac_promisc(priv, ENETC_MAC_FILTER_TYPE_ALL, false);
+		enetc_msg_vf_set_mac_hash_filter(ndev, ENETC_MAC_FILTER_TYPE_ALL);
+	}
+
+out:
+	rtnl_unlock();
+}
+
+static void enetc_vf_set_rx_mode(struct net_device *ndev)
+{
+	struct enetc_ndev_priv *priv = netdev_priv(ndev);
+	struct enetc_si *si = priv->si;
+
+	if (is_enetc_rev1(si))
+		return;
+
+	queue_work(si->workqueue, &si->rx_mode_task);
+}
+
+static int enetc_msg_vf_set_vlan_hash_filter(struct enetc_ndev_priv *priv)
+{
+	struct enetc_msg_vlan_hash_filter *msg;
+	struct enetc_msg_swbd msg_swbd;
+	struct enetc_si *si = priv->si;
+	u32 msg_size;
+	int err;
+
+	/* Currently, hardware only supports 64 bits table size */
+	msg_size = struct_size(msg, hash_tbl, 1);
+	msg_swbd.size = ALIGN(msg_size, ENETC_MSG_ALIGN);
+	msg_swbd.vaddr = dma_alloc_coherent(priv->dev, msg_swbd.size,
+					    &msg_swbd.dma, GFP_KERNEL);
+	if (!msg_swbd.vaddr)
+		return -ENOMEM;
+
+	msg = (struct enetc_msg_vlan_hash_filter *)msg_swbd.vaddr;
+	msg->size = ENETC_VLAN_HASH_TABLE_SIZE_64;
+
+	memcpy(msg->hash_tbl, si->vlan_ht_filter, sizeof(si->vlan_ht_filter));
+	enetc_msg_vsi_fill_cmn_hdr(&msg_swbd, ENETC_MSG_CLASS_ID_VLAN_FILTER,
+				   ENETC_MSG_SET_VLAN_HASH_TABLE, 0, 0);
+
+	/* send the command and wait */
+	err = enetc_msg_vsi_send(si, &msg_swbd);
+
+	dma_free_coherent(priv->dev, msg_swbd.size, msg_swbd.vaddr, msg_swbd.dma);
+
+	return err;
+}
+
+static int enetc_vf_vlan_rx_add_vid(struct net_device *ndev,
+				    __be16 prot, u16 vid)
+{
+	struct enetc_ndev_priv *priv = netdev_priv(ndev);
+	struct enetc_si *si = priv->si;
+	int idx, err = 0;
+
+	__set_bit(vid, si->active_vlans);
+
+	idx = enetc_vid_hash_idx(vid);
+	if (!__test_and_set_bit(idx, si->vlan_ht_filter))
+		err = enetc_msg_vf_set_vlan_hash_filter(priv);
+
+	if (err) {
+		__clear_bit(idx, si->vlan_ht_filter);
+		__clear_bit(vid, si->active_vlans);
+	}
+
+	return err;
+}
+
+static int enetc_vf_vlan_rx_del_vid(struct net_device *ndev,
+				    __be16 prot, u16 vid)
+{
+	struct enetc_ndev_priv *priv = netdev_priv(ndev);
+	struct enetc_si *si = priv->si;
+	int idx, err = 0;
+
+	if (__test_and_clear_bit(vid, si->active_vlans)) {
+		idx = enetc_vid_hash_idx(vid);
+		enetc_refresh_vlan_ht_filter(si);
+		if (!test_bit(idx, si->vlan_ht_filter))
+			err = enetc_msg_vf_set_vlan_hash_filter(priv);
+
+		if (err) {
+			__set_bit(idx, si->vlan_ht_filter);
+			__set_bit(vid, si->active_vlans);
+		}
+	}
+
+	return err;
+}
+
 /* Probing/ Init */
 static const struct net_device_ops enetc_ndev_ops = {
 	.ndo_open		= enetc_open,
@@ -557,15 +459,41 @@ static const struct net_device_ops enetc_ndev_ops = {
 	.ndo_start_xmit		= enetc_xmit,
 	.ndo_get_stats		= enetc_get_stats,
 	.ndo_set_mac_address	= enetc_vf_set_mac_addr,
-	.ndo_set_rx_mode	= enetc_vf_set_rx_mode,
-	.ndo_vlan_rx_add_vid	= enetc_vf_vlan_rx_add_vid,
-	.ndo_vlan_rx_kill_vid	= enetc_vf_vlan_rx_del_vid,
 	.ndo_set_features	= enetc_vf_set_features,
 	.ndo_eth_ioctl		= enetc_ioctl,
 	.ndo_setup_tc		= enetc_vf_setup_tc,
+	.ndo_hwtstamp_get	= enetc_hwtstamp_get,
+	.ndo_hwtstamp_set	= enetc_hwtstamp_set,
+	.ndo_set_rx_mode	= enetc_vf_set_rx_mode,
+	.ndo_vlan_rx_add_vid	= enetc_vf_vlan_rx_add_vid,
+	.ndo_vlan_rx_kill_vid	= enetc_vf_vlan_rx_del_vid,
 	.ndo_bpf		= enetc_setup_bpf,
 	.ndo_xdp_xmit		= enetc_xdp_xmit,
 };
+
+static void enetc_vf_get_revision(struct enetc_si *si)
+{
+	u8 ip_mj = si->pdev->revision;
+	u8 ip_mn;
+
+	if (is_enetc_rev1(si)) {
+		si->revision = ENETC_REV_1_0;
+
+		return;
+	}
+
+	ip_mn = enetc_msg_vsi_get_ip_minor_revision(si);
+	if (ip_mn != ENETC_PF_RC_IP_REVISION_INVALID) {
+		si->revision = (u16)ip_mj << 8 | ip_mn;
+
+		return;
+	}
+
+	si->revision = ENETC_REV_4_1;
+	dev_info(&si->pdev->dev,
+		 "Failed to get IP revision, use compatible revision: 0x%04x\n",
+		 si->revision);
+}
 
 static void enetc_vf_netdev_setup(struct enetc_si *si, struct net_device *ndev,
 				  const struct net_device_ops *ndev_ops)
@@ -579,27 +507,17 @@ static void enetc_vf_netdev_setup(struct enetc_si *si, struct net_device *ndev,
 	si->ndev = ndev;
 
 	priv->msg_enable = (NETIF_MSG_IFUP << 1) - 1;
+	priv->sysclk_freq = si->drvdata->sysclk_freq;
+	priv->max_frags = si->drvdata->max_frags;
+	priv->shared_tx_rings = si->drvdata->shared_tx_rings;
 	ndev->netdev_ops = ndev_ops;
 	enetc_set_ethtool_ops(ndev);
 	ndev->watchdog_timeo = 5 * HZ;
-
-	if (is_enetc_rev1(si)) {
-		ndev->max_mtu = ENETC_MAX_MTU;
-		priv->max_frags_bd = ENETC_MAX_SKB_FRAGS;
-	} else {
-		ndev->max_mtu = ENETC4_MAX_MTU;
-		priv->active_offloads |= ENETC_F_CHECKSUM;
-		priv->max_frags_bd = ENETC4_MAX_SKB_FRAGS;
-		priv->shared_tx_rings = true;
-	}
-
-	if (si->hw_features & ENETC_SI_F_LSO)
-		priv->active_offloads |= ENETC_F_LSO;
+	ndev->max_mtu = ENETC_MAX_MTU;
 
 	ndev->hw_features = NETIF_F_SG | NETIF_F_RXCSUM |
 			    NETIF_F_HW_VLAN_CTAG_TX |
 			    NETIF_F_HW_VLAN_CTAG_RX |
-			    NETIF_F_HW_VLAN_CTAG_FILTER |
 			    NETIF_F_HW_CSUM | NETIF_F_TSO | NETIF_F_TSO6 |
 			    NETIF_F_GSO_UDP_L4;
 	ndev->features = NETIF_F_HIGHDMA | NETIF_F_SG | NETIF_F_RXCSUM |
@@ -608,22 +526,32 @@ static void enetc_vf_netdev_setup(struct enetc_si *si, struct net_device *ndev,
 			 NETIF_F_HW_CSUM | NETIF_F_TSO | NETIF_F_TSO6 |
 			 NETIF_F_GSO_UDP_L4;
 	ndev->vlan_features = NETIF_F_SG | NETIF_F_HW_CSUM |
-			      NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_GSO_UDP_L4;
+			      NETIF_F_TSO | NETIF_F_TSO6;
+
+	if (!is_enetc_rev1(si)) {
+		ndev->priv_flags |= IFF_UNICAST_FLT;
+		ndev->hw_features |= NETIF_F_HW_VLAN_CTAG_FILTER;
+	}
 
 	ndev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
 			     NETDEV_XDP_ACT_NDO_XMIT | NETDEV_XDP_ACT_RX_SG |
-			     NETDEV_XDP_ACT_NDO_XMIT_SG;
+			     NETDEV_XDP_ACT_NDO_XMIT_SG |
+			     NETDEV_XDP_ACT_XSK_ZEROCOPY;
 
-	/* If driver handles unicast address filtering, it should set
-	 * IFF_UNICAST_FLT in its priv_flags. (Refer to the description
-	 * of the ndo_set_rx_mode())
-	 */
-	ndev->priv_flags |= IFF_UNICAST_FLT;
+	ndev->xdp_zc_max_segs = priv->max_frags;
+	ndev->xdp_metadata_ops = &enetc_xdp_metadata_ops;
+	ndev->xsk_tx_metadata_ops = &enetc_xsk_tx_metadata_ops;
 
 	if (si->num_rss) {
 		ndev->hw_features |= NETIF_F_RXHASH;
 		ndev->features |= NETIF_F_RXHASH;
 	}
+
+	if (si->drvdata->tx_csum)
+		priv->active_offloads |= ENETC_F_TXCSUM;
+
+	if (si->hw_features & ENETC_SI_F_LSO)
+		priv->active_offloads |= ENETC_F_LSO;
 
 	if (si->hw_features & ENETC_SI_F_RSC)
 		ndev->hw_features |= NETIF_F_LRO;
@@ -727,13 +655,57 @@ static void enetc_vf_free_msg_msix(struct enetc_si *si)
 	free_irq(irq, si);
 }
 
+static const struct enetc_si_ops enetc_vsi_ops = {
+	.vf_setup_cbdr = enetc_setup_cbdr,
+	.vf_teardown_cbdr = enetc_teardown_cbdr,
+	.get_rss_table = enetc_get_rss_table,
+	.set_rss_table = enetc_set_rss_table,
+};
+
+static const struct enetc_si_ops enetc4_vsi_ops = {
+	.vf_setup_cbdr = enetc4_setup_cbdr,
+	.vf_teardown_cbdr = enetc4_teardown_cbdr,
+	.get_rss_table = enetc4_get_rss_table,
+	.set_rss_table = enetc4_set_rss_table,
+	.vf_register_msg_msix = enetc_vf_register_msg_msix,
+	.vf_free_msg_msix = enetc_vf_free_msg_msix,
+	.vf_register_link_status_notify = enetc_msg_vf_register_link_status_notify,
+};
+
+static int enetc_vsi_wq_task_init(struct enetc_si *si)
+{
+	char wq_name[24];
+
+	if (is_enetc_rev1(si))
+		return 0;
+
+	snprintf(wq_name, sizeof(wq_name), "enetc-%s", pci_name(si->pdev));
+	si->workqueue = create_singlethread_workqueue(wq_name);
+	if (!si->workqueue)
+		return -ENOMEM;
+
+	INIT_WORK(&si->msg_task, enetc_vf_msg_task);
+	INIT_WORK(&si->rx_mode_task, enetc_vf_do_set_rx_mode);
+
+	return 0;
+}
+
+static void enetc_vsi_wq_task_destroy(struct enetc_si *si)
+{
+	if (is_enetc_rev1(si))
+		return;
+
+	cancel_work(&si->msg_task);
+	cancel_work(&si->rx_mode_task);
+	destroy_workqueue(si->workqueue);
+}
+
 static int enetc_vf_probe(struct pci_dev *pdev,
 			  const struct pci_device_id *ent)
 {
 	struct enetc_ndev_priv *priv;
 	struct net_device *ndev;
 	struct enetc_si *si;
-	char wq_name[24];
 	int err;
 
 	err = enetc_pci_probe(pdev, KBUILD_MODNAME, 0);
@@ -741,20 +713,26 @@ static int enetc_vf_probe(struct pci_dev *pdev,
 		return dev_err_probe(&pdev->dev, err, "PCI probing failed\n");
 
 	si = pci_get_drvdata(pdev);
-	INIT_WORK(&si->rx_mode_task, enetc_vf_do_set_rx_mode);
-	snprintf(wq_name, sizeof(wq_name), "enetc-%s", pci_name(pdev));
-	si->workqueue = create_singlethread_workqueue(wq_name);
-	if (!si->workqueue) {
+	enetc_vf_get_revision(si);
+
+	si->devlink = device_link_add(&pdev->dev, &pdev->physfn->dev,
+				      DL_FLAG_PM_RUNTIME |
+				      DL_FLAG_STATELESS);
+	if (!si->devlink) {
 		err = -ENOMEM;
-		goto err_create_wq;
+		goto err_devlink_add;
 	}
 
-	if (!is_enetc_rev1(si)) {
-		INIT_WORK(&si->msg_task, enetc_vf_msg_task);
-		si->vf_register_msg_msix = enetc_vf_register_msg_msix;
-		si->vf_free_msg_msix = enetc_vf_free_msg_msix;
-		si->vf_register_link_status_notify =
-			enetc_msg_vf_register_link_status_notify;
+	if (is_enetc_rev1(si))
+		si->ops = &enetc_vsi_ops;
+	else
+		si->ops = &enetc4_vsi_ops;
+
+	err = enetc_get_driver_data(si);
+	if (err) {
+		dev_err_probe(&pdev->dev, err,
+			      "Could not get VF driver data\n");
+		goto err_get_driver_data;
 	}
 
 	enetc_get_si_caps(si);
@@ -772,9 +750,9 @@ static int enetc_vf_probe(struct pci_dev *pdev,
 
 	enetc_init_si_rings_params(priv);
 
-	err = enetc_init_cbdr(si);
+	err = si->ops->vf_setup_cbdr(si);
 	if (err)
-		goto err_init_cbdr;
+		goto err_setup_cbdr;
 
 	err = enetc_alloc_si_resources(priv);
 	if (err) {
@@ -794,6 +772,12 @@ static int enetc_vf_probe(struct pci_dev *pdev,
 		goto err_alloc_msix;
 	}
 
+	err = enetc_vsi_wq_task_init(si);
+	if (err) {
+		dev_err(&pdev->dev, "Failed to init workqueue\n");
+		goto err_wq_init;
+	}
+
 	err = register_netdev(ndev);
 	if (err)
 		goto err_reg_netdev;
@@ -803,18 +787,21 @@ static int enetc_vf_probe(struct pci_dev *pdev,
 	return 0;
 
 err_reg_netdev:
+	enetc_vsi_wq_task_destroy(si);
+err_wq_init:
 	enetc_free_msix(priv);
 err_config_si:
 err_alloc_msix:
 	enetc_free_si_resources(priv);
 err_alloc_si_res:
-	enetc_free_cbdr(si);
-err_init_cbdr:
+	si->ops->vf_teardown_cbdr(si);
+err_setup_cbdr:
 	si->ndev = NULL;
 	free_netdev(ndev);
 err_alloc_netdev:
-	destroy_workqueue(si->workqueue);
-err_create_wq:
+err_get_driver_data:
+	device_link_del(si->devlink);
+err_devlink_add:
 	enetc_pci_remove(pdev);
 
 	return err;
@@ -827,31 +814,158 @@ static void enetc_vf_remove(struct pci_dev *pdev)
 
 	priv = netdev_priv(si->ndev);
 	unregister_netdev(si->ndev);
+	enetc_vsi_wq_task_destroy(si);
 
 	enetc_free_msix(priv);
 
 	enetc_free_si_resources(priv);
-	enetc_free_cbdr(si);
+	si->ops->vf_teardown_cbdr(si);
 
 	free_netdev(si->ndev);
-
-	destroy_workqueue(si->workqueue);
-
+	device_link_del(si->devlink);
 	enetc_pci_remove(pdev);
 }
 
 static const struct pci_device_id enetc_vf_id_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_FREESCALE, ENETC_DEV_ID_VF) },
-	{ PCI_DEVICE(PCI_VENDOR_ID_NXP2, PCI_DEVICE_ID_NXP2_ENETC_VF) },
+	{ PCI_DEVICE(NXP_ENETC_VENDOR_ID, NXP_ENETC_VF_DEV_ID) },
 	{ 0, } /* End of table. */
 };
 MODULE_DEVICE_TABLE(pci, enetc_vf_id_table);
+
+static int enetc_vf_enable_pdev(struct pci_dev *pdev)
+{
+	int err;
+
+	pcie_flr(pdev);
+	err = pci_enable_device_mem(pdev);
+	if (err)
+		return err;
+
+	pci_set_master(pdev);
+
+	return 0;
+}
+
+static int enetc_vf_restore_hw_config(struct enetc_si *si)
+{
+	struct enetc_ndev_priv *priv = netdev_priv(si->ndev);
+	struct device *dev = &si->pdev->dev;
+	struct net_device *ndev = si->ndev;
+	int err;
+
+	enetc4_enable_cbdr(si);
+
+	err = enetc_configure_si(priv);
+	if (err)
+		return err;
+
+	if (ndev->features & NETIF_F_HW_VLAN_CTAG_FILTER) {
+		err = enetc_msg_vf_set_vlan_promisc(priv, false);
+		if (err) {
+			dev_err(dev, "Failed to disable VLAN promiscuous mode\n");
+			return err;
+		}
+
+		err = enetc_msg_vf_set_vlan_hash_filter(priv);
+		if (err) {
+			dev_err(dev, "Failed to set VLAN hash filter\n");
+			return err;
+		}
+	}
+
+	return enetc_restore_hw_config(si);
+}
+
+static int enetc_vf_suspend(struct device *dev)
+{
+	struct enetc_si *si = pci_get_drvdata(to_pci_dev(dev));
+	struct enetc_ndev_priv *priv = netdev_priv(si->ndev);
+
+	if (is_enetc_rev1(si))
+		return 0;
+
+	set_bit(ENETC_SUSPEND, &priv->flags);
+	cancel_work_sync(&si->rx_mode_task);
+
+	rtnl_lock();
+
+	if (!netif_running(si->ndev))
+		goto out;
+
+	netif_device_detach(si->ndev);
+	netif_carrier_off(si->ndev);
+	enetc_msg_vf_register_link_status_notify(si, false);
+	enetc_vf_free_msg_msix(si);
+	enetc_suspend(si->ndev, false);
+
+out:
+	rtnl_unlock();
+
+	pci_free_irq_vectors(si->pdev);
+	pci_disable_device(si->pdev);
+
+	return 0;
+}
+
+static int enetc_vf_resume(struct device *dev)
+{
+	struct enetc_si *si = pci_get_drvdata(to_pci_dev(dev));
+	struct enetc_ndev_priv *priv = netdev_priv(si->ndev);
+	struct net_device *ndev = si->ndev;
+	int err;
+
+	if (is_enetc_rev1(si))
+		return 0;
+
+	err = enetc_vf_enable_pdev(si->pdev);
+	if (err) {
+		dev_err(dev, "Failed to enable VF\n");
+		return err;
+	}
+
+	err = enetc_alloc_msix_vectors(netdev_priv(si->ndev));
+	if (err) {
+		dev_err(dev, "Failed to alloc MSI-X vectors\n");
+		return err;
+	}
+
+	err = enetc_vf_restore_hw_config(si);
+	if (err)
+		return err;
+
+	rtnl_lock();
+
+	clear_bit(ENETC_SUSPEND, &priv->flags);
+
+	if (!netif_running(ndev))
+		goto unlock_rtnl;
+
+	err = enetc_resume(ndev, false);
+	if (err) {
+		dev_err(dev, "Failed to resume VF\n");
+		goto unlock_rtnl;
+	}
+
+	enetc_vf_register_msg_msix(si);
+	enetc_msg_vf_register_link_status_notify(si, true);
+	netif_device_attach(ndev);
+
+unlock_rtnl:
+	rtnl_unlock();
+
+	return err;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(enetc_vf_pm_ops, enetc_vf_suspend,
+				enetc_vf_resume);
 
 static struct pci_driver enetc_vf_driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = enetc_vf_id_table,
 	.probe = enetc_vf_probe,
 	.remove = enetc_vf_remove,
+	.driver.pm = pm_ptr(&enetc_vf_pm_ops),
 };
 module_pci_driver(enetc_vf_driver);
 

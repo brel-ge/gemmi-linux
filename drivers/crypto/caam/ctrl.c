@@ -26,7 +26,7 @@
 bool caam_dpaa2;
 EXPORT_SYMBOL(caam_dpaa2);
 
-#ifdef CONFIG_CAAM_QI
+#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI
 #include "qi.h"
 #endif
 
@@ -106,6 +106,7 @@ static void build_deinstantiation_desc(u32 *desc, int handle)
 	append_jump(desc, JUMP_CLASS_CLASS1 | JUMP_TYPE_HALT);
 }
 
+#ifdef CONFIG_OF
 static const struct of_device_id imx8m_machine_match[] = {
 	{ .compatible = "fsl,imx8mm", },
 	{ .compatible = "fsl,imx8mn", },
@@ -114,6 +115,7 @@ static const struct of_device_id imx8m_machine_match[] = {
 	{ .compatible = "fsl,imx8ulp", },
 	{ }
 };
+#endif
 
 /*
  * run_descriptor_deco0 - runs a descriptor on DECO0, under direct control of
@@ -538,6 +540,7 @@ static const struct of_device_id caam_match[] = {
 MODULE_DEVICE_TABLE(of, caam_match);
 
 struct caam_imx_data {
+	bool page0_access;
 	const struct clk_bulk_data *clks;
 	int num_clks;
 };
@@ -550,6 +553,7 @@ static const struct clk_bulk_data caam_imx6_clks[] = {
 };
 
 static const struct caam_imx_data caam_imx6_data = {
+	.page0_access = true,
 	.clks = caam_imx6_clks,
 	.num_clks = ARRAY_SIZE(caam_imx6_clks),
 };
@@ -560,6 +564,7 @@ static const struct clk_bulk_data caam_imx7_clks[] = {
 };
 
 static const struct caam_imx_data caam_imx7_data = {
+	.page0_access = true,
 	.clks = caam_imx7_clks,
 	.num_clks = ARRAY_SIZE(caam_imx7_clks),
 };
@@ -571,6 +576,7 @@ static const struct clk_bulk_data caam_imx6ul_clks[] = {
 };
 
 static const struct caam_imx_data caam_imx6ul_data = {
+	.page0_access = true,
 	.clks = caam_imx6ul_clks,
 	.num_clks = ARRAY_SIZE(caam_imx6ul_clks),
 };
@@ -580,15 +586,20 @@ static const struct clk_bulk_data caam_vf610_clks[] = {
 };
 
 static const struct caam_imx_data caam_vf610_data = {
+	.page0_access = true,
 	.clks = caam_vf610_clks,
 	.num_clks = ARRAY_SIZE(caam_vf610_clks),
 };
+
+static const struct caam_imx_data caam_imx8ulp_data;
 
 static const struct soc_device_attribute caam_imx_soc_table[] = {
 	{ .soc_id = "i.MX6UL", .data = &caam_imx6ul_data },
 	{ .soc_id = "i.MX6*",  .data = &caam_imx6_data },
 	{ .soc_id = "i.MX7*",  .data = &caam_imx7_data },
 	{ .soc_id = "i.MX8M*", .data = &caam_imx7_data },
+	{ .soc_id = "i.MX8ULP", .data = &caam_imx8ulp_data },
+	{ .soc_id = "i.MX8Q*", .data = &caam_imx8ulp_data },
 	{ .soc_id = "VF*",     .data = &caam_vf610_data },
 	{ .family = "Freescale i.MX" },
 	{ /* sentinel */ }
@@ -607,9 +618,9 @@ static int init_clocks(struct device *dev, const struct caam_imx_data *data)
 	int ret;
 
 	ctrlpriv->num_clks = data->num_clks;
-	ctrlpriv->clks = devm_kmemdup(dev, data->clks,
-				      data->num_clks * sizeof(data->clks[0]),
-				      GFP_KERNEL);
+	ctrlpriv->clks = devm_kmemdup_array(dev, data->clks,
+					    data->num_clks, sizeof(*data->clks),
+					    GFP_KERNEL);
 	if (!ctrlpriv->clks)
 		return -ENOMEM;
 
@@ -747,12 +758,12 @@ static int caam_ctrl_rng_init(struct device *dev)
 			 * Also, if a handle was instantiated, do not change
 			 * the TRNG parameters.
 			 */
-			if (!(ctrlpriv->rng4_sh_init || inst_handles)) {
+			if (!inst_handles) {
 				dev_info(dev,
 					 "Entropy delay = %u\n",
 					 ent_delay);
 				kick_trng(dev, ent_delay);
-				ent_delay += 400;
+				ent_delay = ent_delay * 2;
 			}
 			/*
 			 * if instantiate_rng(...) fails, the loop will rerun
@@ -895,8 +906,7 @@ static int caam_ctrl_suspend(struct device *dev)
 {
 	const struct caam_drv_private *ctrlpriv = dev_get_drvdata(dev);
 
-	if (ctrlpriv->caam_off_during_pm && !ctrlpriv->optee_en &&
-	    !ctrlpriv->scu_en)
+	if (ctrlpriv->caam_off_during_pm && !ctrlpriv->no_page0)
 		caam_state_save(dev);
 
 	return 0;
@@ -907,8 +917,7 @@ static int caam_ctrl_resume(struct device *dev)
 	struct caam_drv_private *ctrlpriv = dev_get_drvdata(dev);
 	int ret = 0;
 
-	if (ctrlpriv->caam_off_during_pm && !ctrlpriv->optee_en &&
-	    !ctrlpriv->scu_en) {
+	if (ctrlpriv->caam_off_during_pm && !ctrlpriv->no_page0) {
 		caam_state_restore(dev);
 
 		/* HW and rng will be reset so deinstantiation can be removed */
@@ -943,6 +952,7 @@ static int caam_probe(struct platform_device *pdev)
 	int pg_size;
 	int BLOCK_OFFSET = 0;
 	bool reg_access = true;
+	const struct caam_imx_data *imx_soc_data;
 
 	ctrlpriv = devm_kzalloc(&pdev->dev, sizeof(*ctrlpriv), GFP_KERNEL);
 	if (!ctrlpriv)
@@ -964,7 +974,7 @@ static int caam_probe(struct platform_device *pdev)
 		np = of_find_compatible_node(NULL, NULL, "fsl,imx-scu");
 
 		if (!np)
-			np = of_find_compatible_node(NULL, NULL, "fsl,imx8ulp-se");
+			np = of_find_compatible_node(NULL, NULL, "fsl,imx8ulp-se-fw");
 
 		ctrlpriv->scu_en = !!np;
 		of_node_put(np);
@@ -975,8 +985,10 @@ static int caam_probe(struct platform_device *pdev)
 		 * CAAM clocks cannot be controlled from kernel.
 		 * They are automatically turned on by SCU f/w.
 		 */
-		if (ctrlpriv->scu_en)
+		if (ctrlpriv->scu_en) {
+			ctrlpriv->no_page0 = !reg_access;
 			goto iomap_ctrl;
+		}
 
 		/*
 		 * Until Layerscape and i.MX OP-TEE get in sync,
@@ -993,6 +1005,15 @@ static int caam_probe(struct platform_device *pdev)
 			dev_err(dev, "No clock data provided for i.MX SoC");
 			return -EINVAL;
 		}
+
+		imx_soc_data = imx_soc_match->data;
+		reg_access = reg_access && imx_soc_data->page0_access;
+		ctrlpriv->no_page0 = !reg_access;
+		/*
+		 * CAAM clocks cannot be controlled from kernel.
+		 */
+		if (!imx_soc_data->num_clks)
+			goto iomap_ctrl;
 
 		ret = init_clocks(dev, imx_soc_match->data);
 		if (ret)
@@ -1047,7 +1068,7 @@ iomap_ctrl:
 	caam_dpaa2 = !!(comp_params & CTPR_MS_DPAA2);
 	ctrlpriv->qi_present = !!(comp_params & CTPR_MS_QI_MASK);
 
-#ifdef CONFIG_CAAM_QI
+#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI
 	/* If (DPAA 1.x) QI present, check whether dependencies are available */
 	if (ctrlpriv->qi_present && !caam_dpaa2) {
 		ret = qman_is_probed();
@@ -1204,7 +1225,7 @@ set_dma_mask:
 		wr_reg32(&ctrlpriv->qi->qi_control_lo, QICTL_DQEN);
 
 		/* If QMAN driver is present, init CAAM-QI backend */
-#ifdef CONFIG_CAAM_QI
+#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI
 		ret = caam_qi_init(pdev);
 		if (ret)
 			dev_err(dev, "caam qi i/f init failed: %d\n", ret);

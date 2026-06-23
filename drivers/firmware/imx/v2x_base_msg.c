@@ -11,6 +11,15 @@
 
 #define FW_DBG_DUMP_FIXED_STR		"\nS40X: "
 
+
+#define FW_MAJOR_SHIFT        16
+#define FW_MAJOR_MASK         0xFF
+
+#define FW_MINOR_SHIFT        4
+#define FW_MINOR_MASK         0xFFF
+
+#define FW_PATCH_MASK         0xF
+
 /*
  * v2x_start_rng() - prepare and send the command to start
  *                   initialization of the ELE RNG context
@@ -153,62 +162,188 @@ int v2x_debug_dump(struct se_if_priv *priv)
 	struct se_api_msg *tx_msg __free(kfree) = NULL;
 	struct se_api_msg *rx_msg __free(kfree) = NULL;
 	bool keep_logging;
+	u8 dump_data[408];
+	u8 fmt_str[256];
+	int fmt_str_idx;
+	int rcv_dbg_wd_ct;
 	int msg_ex_cnt;
 	int ret = 0;
-	int i;
+	int w_ct;
 
-	if (!priv)
-		return -EINVAL;
+	if (!priv) {
+		ret = -EINVAL;
+		goto exit;
+	}
 
-	tx_msg = kzalloc(V2X_DEBUG_DUMP_REQ_SZ, GFP_KERNEL);
-	if (!tx_msg)
-		return -ENOMEM;
+	tx_msg = kzalloc(V2X_DBG_DUMP_MSG_SZ, GFP_KERNEL);
+	if (!tx_msg) {
+		ret = -ENOMEM;
+		goto exit;
+	}
 
-	rx_msg = kzalloc(V2X_DEBUG_DUMP_RSP_SZ, GFP_KERNEL);
-	if (!rx_msg)
-		return -ENOMEM;
+	rx_msg = kzalloc(V2X_DBG_DUMP_RSP_MSG_SZ, GFP_KERNEL);
+	if (!rx_msg) {
+		ret = -ENOMEM;
+		goto exit;
+	}
 
 	ret = se_fill_cmd_msg_hdr(priv,
 				  &tx_msg->header,
-				  V2X_DEBUG_DUMP_REQ,
-				  V2X_DEBUG_DUMP_REQ_SZ,
+				  V2X_DBG_DUMP_REQ,
+				  V2X_DBG_DUMP_MSG_SZ,
 				  true);
 	if (ret)
-		return ret;
+		goto exit;
 
 	tx_msg->header.tag = V2X_DEBUG_MU_MSG_CMD_TAG;
 	tx_msg->header.ver = V2X_DEBUG_MU_MSG_VERS;
 	tx_msg->data[0] = 0x1;
 	msg_ex_cnt = 0;
 	do {
-		memset(rx_msg, 0x0, V2X_DEBUG_DUMP_RSP_SZ);
+		w_ct = 0;
+		fmt_str_idx = 0;
 
-		ret = ele_msg_send_rcv(priv->priv_dev_ctx, tx_msg, V2X_DEBUG_DUMP_REQ_SZ,
-				       rx_msg, V2X_DEBUG_DUMP_RSP_SZ);
+		ret = ele_msg_send_rcv(priv->priv_dev_ctx,
+				tx_msg,
+				V2X_DBG_DUMP_MSG_SZ,
+				rx_msg,
+				V2X_DBG_DUMP_RSP_MSG_SZ);
 		if (ret < 0)
-			return ret;
+			goto exit;
 
-		ret = se_val_rsp_hdr_n_status(priv, rx_msg, V2X_DEBUG_DUMP_REQ,
-					      V2X_DEBUG_DUMP_RSP_SZ, true);
-		if (ret) {
+		ret = se_val_rsp_hdr_n_status(priv,
+				rx_msg,
+				V2X_DBG_DUMP_REQ,
+				V2X_DBG_DUMP_RSP_MSG_SZ,
+				true);
+		if (!ret) {
+			rcv_dbg_wd_ct = rx_msg->header.size - V2X_NON_DUMP_BUFFER_SZ;
+			memcpy(fmt_str, FW_DBG_DUMP_FIXED_STR, strlen(FW_DBG_DUMP_FIXED_STR));
+			fmt_str_idx += strlen(FW_DBG_DUMP_FIXED_STR);
+			for (w_ct = 0; w_ct < rcv_dbg_wd_ct; w_ct++) {
+				fmt_str[fmt_str_idx] = '0';
+				fmt_str_idx++;
+				fmt_str[fmt_str_idx] = 'x';
+				fmt_str_idx++;
+				fmt_str[fmt_str_idx] = '%';
+				fmt_str_idx++;
+				fmt_str[fmt_str_idx] = '0';
+				fmt_str_idx++;
+				fmt_str[fmt_str_idx] = '8';
+				fmt_str_idx++;
+				fmt_str[fmt_str_idx] = 'x';
+				fmt_str_idx++;
+				fmt_str[fmt_str_idx] = ' ';
+				fmt_str_idx++;
+				if (w_ct % 2) {
+					memcpy(fmt_str + fmt_str_idx,
+					       FW_DBG_DUMP_FIXED_STR,
+					       strlen(FW_DBG_DUMP_FIXED_STR));
+					fmt_str_idx += strlen(FW_DBG_DUMP_FIXED_STR);
+				}
+			}
+			keep_logging = (rx_msg->header.size < (V2X_DBG_DUMP_RSP_MSG_SZ >> 2)) ?
+					false : true;
+			keep_logging = keep_logging ? (msg_ex_cnt > V2X_MAX_DBG_DMP_PKT ? false : true) : false;
+
+			/*
+			 * Number of spaces = rcv_dbg_wd_ct
+			 * DBG dump length in bytes = rcv_dbg_wd_ct * 4
+			 *
+			 * Since, one byte is represented as 2 character,
+			 * DBG Dump string-length = rcv_dbg_wd_ct * 8
+			 * Fixed string's string-length =
+			 * 			strlen(FW_DBG_DUMP_FIXED_STR) * rcv_dbg_wd_ct
+			 *
+			 * Total dump_data length = Number of spaces +
+			 *  			    DBG Dump string' string-length +
+			 *  			    Fixed string's string-length
+			 *
+			 * Total dump_data length = rcv_dbg_wd_ct + (rcv_dbg_wd_ct * 8) +
+			 *  			    strlen(FW_DBG_DUMP_FIXED_STR) * rcv_dbg_wd_ct
+			 */
+
+			snprintf(dump_data,
+				 ((rcv_dbg_wd_ct * 9) +
+				  (strlen(FW_DBG_DUMP_FIXED_STR) * rcv_dbg_wd_ct)),
+				 fmt_str,
+				 rx_msg->data[1], rx_msg->data[2],
+				 rx_msg->data[3], rx_msg->data[4],
+				 rx_msg->data[5], rx_msg->data[6],
+				 rx_msg->data[7], rx_msg->data[8],
+				 rx_msg->data[9], rx_msg->data[10],
+				 rx_msg->data[11], rx_msg->data[12],
+				 rx_msg->data[13], rx_msg->data[14],
+				 rx_msg->data[15], rx_msg->data[16],
+				 rx_msg->data[17], rx_msg->data[18],
+				 rx_msg->data[19], rx_msg->data[20]);
+
+			dev_err(priv->dev, "%s", dump_data);
+		} else {
 			dev_err(priv->dev, "Dump_Debug_Buffer Error: %x.", ret);
 			break;
 		}
-		keep_logging = (rx_msg->header.size >= (V2X_DEBUG_DUMP_RSP_SZ >> 2) &&
-				msg_ex_cnt < V2X_MAX_DBG_DMP_PKT);
-
-		rx_msg->header.size -= 2;
-
-		if (rx_msg->header.size > 4)
-			rx_msg->header.size--;
-
-		for (i = 0; i < rx_msg->header.size; i += 2)
-			dev_info(priv->dev, "%s%02x_%02x: 0x%08x 0x%08x",
-				 FW_DBG_DUMP_FIXED_STR,	msg_ex_cnt, i,
-				 rx_msg->data[i + 1], rx_msg->data[i + 2]);
-
 		msg_ex_cnt++;
 	} while (keep_logging);
 
+exit:
+	return ret;
+}
+
+int v2x_get_fw_version(struct se_if_priv *priv,
+		       struct se_ioctl_get_v2x_version *v2x_version)
+{
+	struct se_api_msg *tx_msg __free(kfree) = NULL;
+	struct se_api_msg *rx_msg __free(kfree) = NULL;
+	int ret = 0;
+
+	if (!priv) {
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	tx_msg = kzalloc(V2X_DBG_GET_FW_VER_MSG_SZ, GFP_KERNEL);
+	if (!tx_msg) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	rx_msg = kzalloc(V2X_DBG_GET_FW_VER_RSP_MSG_SZ, GFP_KERNEL);
+	if (!rx_msg) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	ret = se_fill_cmd_msg_hdr(priv,
+				  (struct se_msg_hdr *)&tx_msg->header,
+				  V2X_DBG_GET_FW_VER,
+				  V2X_DBG_GET_FW_VER_MSG_SZ,
+				  true);
+
+	if (ret)
+		goto exit;
+
+	ret = ele_msg_send_rcv(priv->priv_dev_ctx,
+			       tx_msg,
+			       V2X_DBG_GET_FW_VER_MSG_SZ,
+			       rx_msg,
+			       V2X_DBG_GET_FW_VER_RSP_MSG_SZ);
+	if (ret < 0)
+		goto exit;
+
+	ret = se_val_rsp_hdr_n_status(priv,
+				      rx_msg,
+				      V2X_DBG_GET_FW_VER,
+				      V2X_DBG_GET_FW_VER_RSP_MSG_SZ,
+				      true);
+	if (ret < 0)
+		goto exit;
+
+	v2x_version->major = (rx_msg->data[1] >> FW_MAJOR_SHIFT) & FW_MAJOR_MASK;
+	v2x_version->minor = (rx_msg->data[1] >> FW_MINOR_SHIFT) & FW_MINOR_MASK;
+	v2x_version->patch = rx_msg->data[1] & FW_PATCH_MASK;
+	v2x_version->commit_id = rx_msg->data[2];
+
+exit:
 	return ret;
 }

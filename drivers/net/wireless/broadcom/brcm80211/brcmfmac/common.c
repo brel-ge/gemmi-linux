@@ -959,14 +959,12 @@ static int __init brcmf_common_pd_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int brcmf_common_pd_remove(struct platform_device *pdev)
+static void brcmf_common_pd_remove(struct platform_device *pdev)
 {
 	brcmf_dbg(INFO, "Enter\n");
 
 	if (brcmfmac_pdata->power_off)
 		brcmfmac_pdata->power_off();
-
-	return 0;
 }
 
 static struct platform_driver brcmf_pd = {
@@ -1012,4 +1010,3 @@ static void __exit brcmfmac_module_exit(void)
 
 module_init(brcmfmac_module_init);
 module_exit(brcmfmac_module_exit);
-

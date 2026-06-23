@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0+
 
 /*
- * Copyright 2017-2020,2022-2025 NXP
+ * Copyright 2017-2020,2022-2026 NXP
  */
 
 #include <linux/irq.h>
 #include <linux/irqflags.h>
-#include <linux/of.h>
-#include <linux/of_graph.h>
 #include <linux/pm_runtime.h>
 #include <linux/spinlock.h>
 
@@ -16,6 +14,7 @@
 #include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_color_mgmt.h>
 #include <drm/drm_encoder.h>
+#include <drm/drm_mode.h>
 
 #include "dpu95.h"
 #include "dpu95-crtc.h"
@@ -148,6 +147,10 @@ dpu95_crtc_mode_valid(struct drm_crtc *crtc, const struct drm_display_mode *mode
 {
 	if (mode->crtc_clock > DPU95_FRAMEGEN_MAX_CLOCK)
 		return MODE_CLOCK_HIGH;
+	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
+		return MODE_NO_INTERLACE;
+	if (mode->flags & DRM_MODE_FLAG_DBLCLK)
+		return MODE_BAD;
 
 	return MODE_OK;
 }
@@ -218,6 +221,9 @@ static void dpu95_crtc_mode_set_nofb(struct drm_crtc *crtc)
 		else
 			dpu95_dt_polvs_active_low(dpu_crtc->dt);
 	}
+
+	if (dpu_crtc->ld)
+		dpu95_ld_mode_set(dpu_crtc->ld, adj);
 }
 
 static int dpu95_crtc_atomic_check(struct drm_crtc *crtc,
@@ -258,7 +264,6 @@ static void dpu95_crtc_atomic_begin(struct drm_crtc *crtc,
 	struct drm_crtc_state *old_crtc_state;
 	struct drm_atomic_state *old_state;
 	struct dpu95_crtc *dpu_crtc = to_dpu95_crtc(crtc);
-	struct drm_plane *plane;
 	struct drm_plane_state *old_plane_state;
 	struct dpu95_plane_state *old_dpstate;
 	struct dpu95_fetchunit *fu;
@@ -281,7 +286,7 @@ static void dpu95_crtc_atomic_begin(struct drm_crtc *crtc,
 	 * Whether any of them would be disabled or kept running depends
 	 * on new plane states in the new global atomic state.
 	 */
-	for_each_old_plane_in_state(old_state, plane, old_plane_state, i) {
+	for_each_old_plane_state_in_state(old_state, old_plane_state, i) {
 		old_dpstate = to_dpu95_plane_state(old_plane_state);
 
 		if (!old_plane_state->fb)
@@ -296,28 +301,19 @@ static void dpu95_crtc_atomic_begin(struct drm_crtc *crtc,
 
 		fu_ops->disable_src_buf(fu);
 
+		if (old_dpstate->hs) {
+			dpu95_hs_pec_clken(old_dpstate->hs, CLKEN_DISABLE);
+			dpu95_hs_mode(old_dpstate->hs, SCALER_NEUTRAL);
+		}
+
+		if (old_dpstate->vs) {
+			dpu95_vs_pec_clken(old_dpstate->vs, CLKEN_DISABLE);
+			dpu95_vs_mode(old_dpstate->vs, SCALER_NEUTRAL);
+		}
+
 		if (old_dpstate->is_top)
 			dpu95_ed_pec_src_sel(dpu_crtc->ed_cont,
 					     DPU95_LINK_ID_NONE);
-	}
-}
-
-static void dpu95_crtc_atomic_flush_scalers(struct drm_crtc *crtc)
-{
-	struct dpu95_plane *dplane = to_dpu95_plane(crtc->primary);
-	struct dpu95_hscaler *hs = dplane->grp->hs;
-	struct dpu95_vscaler *vs = dplane->grp->vs;
-	const struct dpu95_hscaler_ops *hs_ops;
-	const struct dpu95_vscaler_ops *vs_ops;
-
-	hs_ops = dpu95_hs_get_ops(hs);
-	if (!hs_ops->is_enabled(hs))
-		hs_ops->set_no_stream_id(hs);
-
-	if (vs) {
-		vs_ops = dpu95_vs_get_ops(vs);
-		if (!vs_ops->is_enabled(vs))
-			vs_ops->set_no_stream_id(vs);
 	}
 }
 
@@ -328,11 +324,14 @@ static void dpu95_crtc_atomic_flush(struct drm_crtc *crtc,
 	struct dpu95_crtc *dpu_crtc = to_dpu95_crtc(crtc);
 	const struct dpu95_fetchunit_ops *fu_ops;
 	struct drm_plane_state *old_plane_state;
+	const struct dpu95_hscaler_ops *hs_ops;
+	const struct dpu95_vscaler_ops *vs_ops;
 	struct drm_crtc_state *old_crtc_state;
 	struct dpu95_plane_state *old_dpstate;
 	struct drm_atomic_state *old_state;
 	struct dpu95_fetchunit *fu;
-	struct drm_plane *plane;
+	struct dpu95_hscaler *hs;
+	struct dpu95_vscaler *vs;
 	int i;
 
 	old_crtc_state = drm_atomic_get_old_crtc_state(state, crtc);
@@ -346,7 +345,7 @@ static void dpu95_crtc_atomic_flush(struct drm_crtc *crtc,
 	}
 
 	/* Set no stream id for disabled fetchunits of relevant planes. */
-	for_each_old_plane_in_state(old_state, plane, old_plane_state, i) {
+	for_each_old_plane_state_in_state(old_state, old_plane_state, i) {
 		old_dpstate = to_dpu95_plane_state(old_plane_state);
 
 		if (!old_plane_state->fb)
@@ -361,9 +360,21 @@ static void dpu95_crtc_atomic_flush(struct drm_crtc *crtc,
 
 		if (!fu_ops->is_enabled(fu))
 			fu_ops->set_no_stream_id(fu);
-	}
 
-	dpu95_crtc_atomic_flush_scalers(crtc);
+		hs = old_dpstate->hs;
+		if (hs) {
+			hs_ops = dpu95_hs_get_ops(hs);
+			if (!hs_ops->is_enabled(hs))
+				hs_ops->set_no_stream_id(hs);
+		}
+
+		vs = old_dpstate->vs;
+		if (vs) {
+			vs_ops = dpu95_vs_get_ops(vs);
+			if (!vs_ops->is_enabled(vs))
+				vs_ops->set_no_stream_id(vs);
+		}
+	}
 
 	if (!need_modeset && crtc->state->active) {
 		/*
@@ -437,6 +448,9 @@ static void dpu95_crtc_atomic_enable(struct drm_crtc *crtc,
 
 	DPU95_CRTC_WAIT_FOR_FRAMEGEN_PRIMARY_SYNCUP(dpu_crtc->fg);
 
+	if (dpu_crtc->ld)
+		dpu95_ld_enable(dpu_crtc->ld);
+
 	/* ignore initial empty primary pixel FIFO read status, just clear it */
 	dpu95_fg_primary_clear_channel_status(dpu_crtc->fg);
 
@@ -449,6 +463,9 @@ static void dpu95_crtc_disable(struct drm_crtc *crtc)
 	struct dpu95_crtc *dpu_crtc = to_dpu95_crtc(crtc);
 	struct drm_encoder *encoder = &dpu_drm->encoder[dpu_crtc->stream_id];
 	bool enc_is_dsi = encoder->encoder_type == DRM_MODE_ENCODER_DSI;
+
+	if (dpu_crtc->ld)
+		dpu95_ld_disable(dpu_crtc->ld);
 
 	enable_irq(dpu_crtc->dec_seq_complete_irq);
 	dpu95_fg_disable(dpu_crtc->fg);
@@ -533,6 +550,7 @@ static int dpu95_crtc_get_resources(struct dpu95_crtc *dpu_crtc)
 		{(void *)&dpu_crtc->fg,		(void *)dpu95_fg_get},
 		{(void *)&dpu_crtc->db,		(void *)dpu95_db_get},
 		{(void *)&dpu_crtc->dt,		(void *)dpu95_dt_get},
+		{(void *)&dpu_crtc->ld,		(void *)dpu95_ld_get},
 	};
 	int i, ret;
 
@@ -625,19 +643,8 @@ int dpu95_crtc_init(struct dpu95_drm_device *dpu_drm,
 	struct drm_device *drm = &dpu_drm->base;
 	struct drm_crtc *crtc = &dpu_crtc->base;
 	struct dpu95_plane *dpu_primary;
-	struct device *dev = drm->dev;
-	struct device_node *port;
+	const struct dpu95_data	*data;
 	int ret;
-
-	port = of_graph_get_port_by_id(dev->of_node, stream_id);
-	if (!port) {
-		drm_err(drm, "failed to get port for stream%d\n", stream_id);
-		return -ENODEV;
-	}
-
-	dpu_crtc->np = port;
-
-	of_node_put(port);
 
 	init_completion(&dpu_crtc->dec_seq_complete_done);
 	init_completion(&dpu_crtc->dec_shdld_done);
@@ -647,19 +654,12 @@ int dpu95_crtc_init(struct dpu95_drm_device *dpu_drm,
 	dpu_crtc->dpu = &dpu_drm->dpu_soc;
 	dpu_crtc->stream_id = stream_id;
 
-	if (stream_id == 0) {
-		dpu_crtc->dpu_dec_frame_complete_irq	= DPU95_IRQ_DISENGCFG_FRAMECOMPLETE0;
-		dpu_crtc->dpu_dec_seq_complete_irq	= DPU95_IRQ_DISENGCFG_SEQCOMPLETE0;
-		dpu_crtc->dpu_dec_shdld_irq		= DPU95_IRQ_DISENGCFG_SHDLOAD0;
-		dpu_crtc->dpu_db_shdld_irq		= DPU95_IRQ_DOMAINBLEND0_SHDLOAD;
-		dpu_crtc->dpu_ed_cont_shdld_irq		= DPU95_IRQ_EXTDST0_SHDLOAD;
-	} else {
-		dpu_crtc->dpu_dec_frame_complete_irq	= DPU95_IRQ_DISENGCFG_FRAMECOMPLETE1;
-		dpu_crtc->dpu_dec_seq_complete_irq	= DPU95_IRQ_DISENGCFG_SEQCOMPLETE1;
-		dpu_crtc->dpu_dec_shdld_irq		= DPU95_IRQ_DISENGCFG_SHDLOAD1;
-		dpu_crtc->dpu_db_shdld_irq		= DPU95_IRQ_DOMAINBLEND1_SHDLOAD;
-		dpu_crtc->dpu_ed_cont_shdld_irq		= DPU95_IRQ_EXTDST1_SHDLOAD;
-	}
+	data = dpu_crtc->dpu->data;
+	dpu_crtc->dpu_dec_frame_complete_irq	= data->dec_frame_complete_irq[stream_id];
+	dpu_crtc->dpu_dec_seq_complete_irq	= data->dec_seq_complete_irq[stream_id];
+	dpu_crtc->dpu_dec_shdld_irq		= data->dec_shdld_irq[stream_id];
+	dpu_crtc->dpu_db_shdld_irq		= data->db_shdld_irq[stream_id];
+	dpu_crtc->dpu_ed_cont_shdld_irq		= data->ed_cont_shdld_irq[stream_id];
 
 	ret = dpu95_crtc_get_resources(dpu_crtc);
 	if (ret) {
@@ -671,8 +671,7 @@ int dpu95_crtc_init(struct dpu95_drm_device *dpu_drm,
 	plane_grp->cf[stream_id] = dpu_crtc->cf_cont;
 	plane_grp->ed[stream_id] = dpu_crtc->ed_cont;
 	plane_grp->hs = dpu95_hs_get(dpu_crtc->dpu, 4);
-	if (dpu_crtc->dpu->use_vs4)
-		plane_grp->vs = dpu95_vs_get(dpu_crtc->dpu, 4);
+	plane_grp->vs = dpu95_vs_get(dpu_crtc->dpu, 4);
 
 	/* each CRTC has a primary plane */
 	dpu_primary = &dpu_drm->dpu_primary[stream_id];

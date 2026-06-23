@@ -67,6 +67,8 @@ struct wm8962_priv {
 	struct mutex dsp2_ena_lock;
 	u16 dsp2_ena;
 
+	int mic_status;
+
 	struct delayed_work mic_work;
 	struct snd_soc_jack *jack;
 
@@ -82,6 +84,9 @@ struct wm8962_priv {
 #endif
 
 	int irq;
+	bool master_flag;
+	int tdm_width;
+	int tdm_slots;
 };
 
 /* We can't use the same notifier block for more than one supply and
@@ -1759,7 +1764,7 @@ SND_SOC_BYTES("EQR Coefficients", WM8962_EQ24, 18),
 
 
 SOC_SINGLE("3D Switch", WM8962_THREED1, 0, 1, 0),
-SND_SOC_BYTES_MASK("3D Coefficients", WM8962_THREED1, 4, WM8962_THREED_ENA),
+SND_SOC_BYTES_MASK("3D Coefficients", WM8962_THREED1, 4, WM8962_THREED_ENA | WM8962_ADC_MONOMIX),
 
 SOC_SINGLE("DF1 Switch", WM8962_DF1, 0, 1, 0),
 SND_SOC_BYTES_MASK("DF1 Coefficients", WM8962_DF1, 7, WM8962_DF1_ENA),
@@ -1854,10 +1859,10 @@ static int tp_event(struct snd_soc_dapm_widget *w,
 
 	reg = WM8962_ADDITIONAL_CONTROL_4;
 
-	if (!strcmp(w->name, "TEMP_HP")) {
+	if (!snd_soc_dapm_widget_name_cmp(w, "TEMP_HP")) {
 		mask = WM8962_TEMP_ENA_HP_MASK;
 		val = WM8962_TEMP_ENA_HP;
-	} else if (!strcmp(w->name, "TEMP_SPK")) {
+	} else if (!snd_soc_dapm_widget_name_cmp(w, "TEMP_SPK")) {
 		mask = WM8962_TEMP_ENA_SPK_MASK;
 		val = WM8962_TEMP_ENA_SPK;
 	} else {
@@ -2606,6 +2611,19 @@ static int wm8962_set_bias_level(struct snd_soc_component *component,
 	return 0;
 }
 
+static int wm8962_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
+			       unsigned int rx_mask, int slots, int slot_width)
+{
+	struct snd_soc_component *component = dai->component;
+	struct wm8962_priv *wm8962 = snd_soc_component_get_drvdata(component);
+
+	wm8962->tdm_width = slot_width;
+	/* External is one slot one channel, but internal is one slot two channels */
+	wm8962->tdm_slots = slots / 2;
+
+	return 0;
+}
+
 static const struct {
 	int rate;
 	int reg;
@@ -2632,10 +2650,21 @@ static int wm8962_hw_params(struct snd_pcm_substream *substream,
 	int i;
 	int aif0 = 0;
 	int adctl3 = 0;
+	int width;
 
-	wm8962->bclk = snd_soc_params_to_bclk(params);
-	if (params_channels(params) == 1)
-		wm8962->bclk *= 2;
+	if (wm8962->tdm_width && wm8962->tdm_slots) {
+		wm8962->bclk = snd_soc_calc_bclk(params_rate(params),
+						 wm8962->tdm_width,
+						 params_channels(params),
+						 wm8962->tdm_slots);
+		width = wm8962->tdm_width;
+	} else {
+		wm8962->bclk = snd_soc_params_to_bclk(params);
+		width = params_width(params);
+
+		if (params_channels(params) == 1)
+			wm8962->bclk *= 2;
+	}
 
 	wm8962->lrclk = params_rate(params);
 
@@ -2653,7 +2682,7 @@ static int wm8962_hw_params(struct snd_pcm_substream *substream,
 	if (wm8962->lrclk % 8000 == 0)
 		adctl3 |= WM8962_SAMPLE_RATE_INT_MODE;
 
-	switch (params_width(params)) {
+	switch (width) {
 	case 16:
 		break;
 	case 20:
@@ -2715,6 +2744,7 @@ static int wm8962_set_dai_sysclk(struct snd_soc_dai *dai, int clk_id,
 static int wm8962_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 {
 	struct snd_soc_component *component = dai->component;
+	struct wm8962_priv *wm8962 = snd_soc_component_get_drvdata(component);
 	int aif0 = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
@@ -2761,11 +2791,13 @@ static int wm8962_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 		return -EINVAL;
 	}
 
+	wm8962->master_flag = false;
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		aif0 |= WM8962_MSTR;
+		wm8962->master_flag = true;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
 	default:
 		return -EINVAL;
@@ -2886,7 +2918,7 @@ static int wm8962_set_fll(struct snd_soc_component *component, int fll_id, int s
 {
 	struct wm8962_priv *wm8962 = snd_soc_component_get_drvdata(component);
 	struct _fll_div fll_div;
-	unsigned long timeout;
+	unsigned long time_left;
 	int ret;
 	int fll1 = 0;
 
@@ -2974,14 +3006,14 @@ static int wm8962_set_fll(struct snd_soc_component *component, int fll_id, int s
 	 * higher if we'll error out
 	 */
 	if (wm8962->irq)
-		timeout = msecs_to_jiffies(5);
+		time_left = msecs_to_jiffies(5);
 	else
-		timeout = msecs_to_jiffies(1);
+		time_left = msecs_to_jiffies(1);
 
-	timeout = wait_for_completion_timeout(&wm8962->fll_lock,
-					      timeout);
+	time_left = wait_for_completion_timeout(&wm8962->fll_lock,
+						time_left);
 
-	if (timeout == 0 && wm8962->irq) {
+	if (time_left == 0 && wm8962->irq) {
 		dev_err(component->dev, "FLL lock timed out");
 		snd_soc_component_update_bits(component, WM8962_FLL_CONTROL_1,
 				    WM8962_FLL_ENA, 0);
@@ -3029,6 +3061,7 @@ static const struct snd_soc_dai_ops wm8962_dai_ops = {
 	.hw_params = wm8962_hw_params,
 	.set_sysclk = wm8962_set_dai_sysclk,
 	.set_fmt = wm8962_set_dai_fmt,
+	.set_tdm_slot = wm8962_set_tdm_slot,
 	.mute_stream = wm8962_mute,
 	.no_capture_mute = 1,
 };
@@ -3073,7 +3106,15 @@ static void wm8962_mic_work(struct work_struct *work)
 	if (reg & WM8962_MICSHORT_STS) {
 		status |= SND_JACK_BTN_0;
 		irq_pol |= WM8962_MICSCD_IRQ_POL;
+
+		/* Don't report a microphone if it's shorted right after
+		 * plugging in, as this may be a TRS plug in a TRRS socket.
+		 */
+		if (!(wm8962->mic_status & WM8962_MICDET_STS))
+			status = 0;
 	}
+
+	wm8962->mic_status = status;
 
 	snd_soc_jack_report(wm8962->jack, status,
 			    SND_JACK_MICROPHONE | SND_JACK_BTN_0);
@@ -3407,13 +3448,16 @@ static int wm8962_gpio_request(struct gpio_chip *chip, unsigned offset)
 	return 0;
 }
 
-static void wm8962_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+static int wm8962_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			   int value)
 {
 	struct wm8962_priv *wm8962 = gpiochip_get_data(chip);
 	struct snd_soc_component *component = wm8962->component;
 
-	snd_soc_component_update_bits(component, WM8962_GPIO_BASE + offset,
-			    WM8962_GP2_LVL, !!value << WM8962_GP2_LVL_SHIFT);
+	return snd_soc_component_update_bits(component,
+					     WM8962_GPIO_BASE + offset,
+					     WM8962_GP2_LVL,
+					     !!value << WM8962_GP2_LVL_SHIFT);
 }
 
 static int wm8962_gpio_direction_out(struct gpio_chip *chip,
@@ -3850,7 +3894,6 @@ static void wm8962_i2c_remove(struct i2c_client *client)
 	pm_runtime_disable(&client->dev);
 }
 
-#ifdef CONFIG_PM
 static int wm8962_runtime_resume(struct device *dev)
 {
 	struct wm8962_priv *wm8962 = dev_get_drvdata(dev);
@@ -3901,6 +3944,9 @@ static int wm8962_runtime_resume(struct device *dev)
 			   WM8962_BIAS_ENA | WM8962_VMID_SEL_MASK,
 			   WM8962_BIAS_ENA | 0x180);
 
+	if (wm8962->master_flag)
+		regmap_update_bits(wm8962->regmap, WM8962_AUDIO_INTERFACE_0,
+				   WM8962_MSTR, WM8962_MSTR);
 	msleep(5);
 
 	return 0;
@@ -3913,6 +3959,10 @@ disable_clock:
 static int wm8962_runtime_suspend(struct device *dev)
 {
 	struct wm8962_priv *wm8962 = dev_get_drvdata(dev);
+
+	if (wm8962->master_flag)
+		regmap_update_bits(wm8962->regmap, WM8962_AUDIO_INTERFACE_0,
+				   WM8962_MSTR, 0);
 
 	regmap_update_bits(wm8962->regmap, WM8962_PWR_MGMT_1,
 			   WM8962_VMID_SEL_MASK | WM8962_BIAS_ENA, 0);
@@ -3930,15 +3980,14 @@ static int wm8962_runtime_suspend(struct device *dev)
 
 	return 0;
 }
-#endif
 
 static const struct dev_pm_ops wm8962_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
-	SET_RUNTIME_PM_OPS(wm8962_runtime_suspend, wm8962_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+	RUNTIME_PM_OPS(wm8962_runtime_suspend, wm8962_runtime_resume, NULL)
 };
 
 static const struct i2c_device_id wm8962_i2c_id[] = {
-	{ "wm8962", 0 },
+	{ "wm8962" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8962_i2c_id);
@@ -3953,7 +4002,7 @@ static struct i2c_driver wm8962_i2c_driver = {
 	.driver = {
 		.name = "wm8962",
 		.of_match_table = wm8962_of_match,
-		.pm = &wm8962_pm,
+		.pm = pm_ptr(&wm8962_pm),
 	},
 	.probe =    wm8962_i2c_probe,
 	.remove =   wm8962_i2c_remove,

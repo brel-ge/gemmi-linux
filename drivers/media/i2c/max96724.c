@@ -34,6 +34,12 @@
 
 #define MAX96724_XTAL_CLOCK		25000000ULL
 
+static const char *const max96724_supplies[] = {
+	"v1p8",	 /* 1.8V supply */
+	"v3p3",	 /* 3.3V supply */
+	"v12p0", /* 12V supply  */
+};
+
 enum max96724_data_type {
 	MAX96724_DT_EMBEDDED		= 0x12,
 	MAX96724_DT_YUV422_8BIT		= 0x1E,
@@ -55,7 +61,6 @@ enum max96724_gmsl_speed {
 	MAX96724_GMSL_3G		= 1,
 	MAX96724_GMSL_6G		= 2,
 };
-
 
 enum max96724_i2c_speed {
 	MAX96724_I2C_BPS_9920,
@@ -378,7 +383,7 @@ static int max96724_i2c_init(struct max96724_priv *priv)
 		if (!(priv->gmsl_link_mask & BIT(link)))
 			continue;
 
-		ret = i2c_mux_add_adapter(priv->mux, 0, link, 0);
+		ret = i2c_mux_add_adapter(priv->mux, 0, link);
 		if (ret < 0)
 			goto error;
 	}
@@ -512,7 +517,24 @@ static int max96724_parse_dt(struct max96724_priv *priv)
 {
 	struct device *dev = &priv->client->dev;
 	struct device_node *node = NULL;
+	u32 fsync_interval[2];
 	int ret;
+
+	/* Parse fsync default interval, if provided */
+	ret = of_property_read_u32_array(dev->of_node,
+					 "maxim,fsync-default-interval",
+					 fsync_interval, 2);
+	if (ret == 0) {
+		if (fsync_interval[0] == 0 || fsync_interval[1] == 0) {
+			dev_warn(dev, "Bad fsync interval values, ignoring.\n");
+		} else {
+			priv->interval.numerator = fsync_interval[0];
+			priv->interval.denominator = fsync_interval[1];
+
+			dev_info(dev, "Default fsync interval set to %u/%u\n",
+				 fsync_interval[0], fsync_interval[1]);
+		}
+	}
 
 	for_each_endpoint_of_node(dev->of_node, node) {
 		struct of_endpoint ep;
@@ -735,7 +757,7 @@ static int max96724_pipe_setup(struct max96724_priv *priv, int pipe,
 	u8 pos_shift;
 
 	/* the pixel data is on VC0 */
-	format = v4l2_subdev_state_get_stream_format(state, pipe, 0);
+	format = v4l2_subdev_state_get_format(state, pipe, 0);
 	if (!format)
 		return -EINVAL;
 
@@ -916,8 +938,9 @@ static int max96724_setup_all_pipes(struct max96724_priv *priv, struct v4l2_subd
 	return 0;
 }
 
-static int max96724_g_frame_interval(struct v4l2_subdev *sd,
-				     struct v4l2_subdev_frame_interval *interval)
+static int max96724_get_frame_interval(struct v4l2_subdev *sd,
+				       struct v4l2_subdev_state *state,
+				       struct v4l2_subdev_frame_interval *interval)
 {
 	struct max96724_priv *priv = container_of(sd, struct max96724_priv, sd);
 
@@ -929,8 +952,9 @@ static int max96724_g_frame_interval(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int max96724_s_frame_interval(struct v4l2_subdev *sd,
-				     struct v4l2_subdev_frame_interval *interval)
+static int max96724_set_frame_interval(struct v4l2_subdev *sd,
+				       struct v4l2_subdev_state *state,
+				       struct v4l2_subdev_frame_interval *interval)
 {
 	struct max96724_priv *priv = container_of(sd, struct max96724_priv, sd);
 
@@ -941,11 +965,6 @@ static int max96724_s_frame_interval(struct v4l2_subdev *sd,
 
 	return 0;
 }
-
-static const struct v4l2_subdev_video_ops max96724_v4l2_video_ops = {
-	.g_frame_interval = max96724_g_frame_interval,
-	.s_frame_interval = max96724_s_frame_interval,
-};
 
 static int max96724_set_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *state,
 			    struct v4l2_subdev_format *format)
@@ -967,7 +986,7 @@ static int max96724_set_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *st
 	if (i == ARRAY_SIZE(max96724_formats))
 		format->format.code = max96724_formats[12].code;
 
-	sink_fmt = v4l2_subdev_state_get_stream_format(state, format->pad, format->stream);
+	sink_fmt = v4l2_subdev_state_get_format(state, format->pad, format->stream);
 	if (!sink_fmt)
 		return -EINVAL;
 
@@ -979,8 +998,8 @@ static int max96724_set_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *st
 		if (route->sink_pad != format->pad || route->sink_stream != format->stream)
 			continue;
 
-		source_fmt = v4l2_subdev_state_get_stream_format(state, route->source_pad,
-								 route->source_stream);
+		source_fmt = v4l2_subdev_state_get_format(state, route->source_pad,
+							  route->source_stream);
 		if (!source_fmt)
 			return -EINVAL;
 
@@ -990,7 +1009,7 @@ static int max96724_set_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *st
 	return 0;
 }
 
-static int max96724_init_cfg(struct v4l2_subdev *sd, struct v4l2_subdev_state *sd_state)
+static int max96724_init_state(struct v4l2_subdev *sd, struct v4l2_subdev_state *sd_state)
 {
 	struct max96724_priv *priv = container_of(sd, struct max96724_priv, sd);
 	struct v4l2_subdev_krouting routing = {};
@@ -1037,17 +1056,23 @@ static int max96724_set_routing(struct v4l2_subdev *sd, struct v4l2_subdev_state
 
 static struct v4l2_subdev *max96724_xlate_streams(struct max96724_priv *priv,
 						  struct v4l2_subdev_state *state, u32 src_pad,
-						  u64 src_streams, u32 sink_pad, u64 *sink_streams,
+						  u32 src_stream, u32 *sink_stream,
 						  u32 *remote_pad)
 {
 	struct device *dev = &priv->client->dev;
-	u64 streams;
 	struct v4l2_subdev *remote_sd;
 	struct media_pad *pad;
+	u32 other_stream;
+	u32 sink_pad;
+	int ret;
 
-	streams = v4l2_subdev_state_xlate_streams(state, src_pad, sink_pad, &src_streams);
-	if (!streams)
-		dev_dbg(dev, "no streams found on sink pad\n");
+	ret = v4l2_subdev_routing_find_opposite_end(&state->routing, src_pad,
+						    src_stream, &sink_pad,
+						    &other_stream);
+	if (ret) {
+		dev_err(dev, "failed to find opposite end for pad %u\n", src_pad);
+		return ERR_PTR(ret);
+	}
 
 	pad = media_pad_remote_pad_first(&priv->pads[sink_pad]);
 	if (!pad) {
@@ -1061,7 +1086,7 @@ static struct v4l2_subdev *max96724_xlate_streams(struct max96724_priv *priv,
 		return ERR_PTR(-EPIPE);
 	}
 
-	*sink_streams = streams;
+	*sink_stream = other_stream;
 	*remote_pad = pad->index;
 
 	return remote_sd;
@@ -1075,7 +1100,7 @@ static int max96724_enable_streams(struct v4l2_subdev *sd, struct v4l2_subdev_st
 	struct v4l2_subdev *remote_sd;
 	int ret = 0;
 	u32 remote_pad = 0;
-	u64 sink_streams = 0;
+	u32 sink_stream = 0;
 	u64 sources_mask = streams_mask;
 
 	mutex_lock(&priv->lock);
@@ -1100,8 +1125,8 @@ static int max96724_enable_streams(struct v4l2_subdev *sd, struct v4l2_subdev_st
 		if (pos == -1)
 			break;
 
-		remote_sd = max96724_xlate_streams(priv, state, src_pad, BIT(pos), pos,
-						   &sink_streams, &remote_pad);
+		remote_sd = max96724_xlate_streams(priv, state, src_pad, pos,
+						   &sink_stream, &remote_pad);
 		if (IS_ERR(remote_sd)) {
 			ret = PTR_ERR(remote_sd);
 			goto unlock;
@@ -1109,8 +1134,8 @@ static int max96724_enable_streams(struct v4l2_subdev *sd, struct v4l2_subdev_st
 
 		ret = v4l2_subdev_enable_streams(remote_sd, remote_pad, 0x1);
 		if (ret) {
-			dev_err(dev, "failed to enable streams 0x%llx on '%s':%u: %d\n",
-				sink_streams, remote_sd->name, remote_pad, ret);
+			dev_err(dev, "failed to enable stream %d on '%s':%u: %d\n",
+				sink_stream, remote_sd->name, remote_pad, ret);
 			goto unlock;
 		}
 
@@ -1131,7 +1156,7 @@ static int max96724_disable_streams(struct v4l2_subdev *sd, struct v4l2_subdev_s
 	struct max96724_priv *priv = container_of(sd, struct max96724_priv, sd);
 	struct device *dev = &priv->client->dev;
 	struct v4l2_subdev *remote_sd;
-	u64 sink_streams = 0;
+	u32 sink_stream = 0;
 	u64 sources_mask = streams_mask;
 	u32 remote_pad = 0;
 	int ret = 0;
@@ -1147,8 +1172,8 @@ static int max96724_disable_streams(struct v4l2_subdev *sd, struct v4l2_subdev_s
 		if (pos == -1)
 			break;
 
-		remote_sd = max96724_xlate_streams(priv, state, src_pad, BIT(pos), pos,
-						   &sink_streams, &remote_pad);
+		remote_sd = max96724_xlate_streams(priv, state, src_pad, pos,
+						   &sink_stream, &remote_pad);
 		if (IS_ERR(remote_sd)) {
 			ret = PTR_ERR(remote_sd);
 			goto unlock;
@@ -1157,8 +1182,8 @@ static int max96724_disable_streams(struct v4l2_subdev *sd, struct v4l2_subdev_s
 		ret = v4l2_subdev_disable_streams(remote_sd, remote_pad, 0x1);
 		if (ret) {
 			dev_err(dev,
-				"failed to disable streams 0x%llx on '%s':%u: %d\n",
-				sink_streams, remote_sd->name, remote_pad, ret);
+				"failed to disable streams %d on '%s':%u: %d\n",
+				sink_stream, remote_sd->name, remote_pad, ret);
 			goto unlock;
 		}
 
@@ -1283,12 +1308,13 @@ static int max96724_enum_mbus_code(struct v4l2_subdev *sd, struct v4l2_subdev_st
 }
 
 static const struct v4l2_subdev_pad_ops max96724_v4l2_pad_ops = {
-	.init_cfg		= max96724_init_cfg,
 	.enum_mbus_code		= max96724_enum_mbus_code,
 	.get_fmt		= v4l2_subdev_get_fmt,
 	.set_fmt		= max96724_set_fmt,
 	.set_routing		= max96724_set_routing,
 	.get_frame_desc		= max96724_get_frame_desc,
+	.get_frame_interval	= max96724_get_frame_interval,
+	.set_frame_interval	= max96724_set_frame_interval,
 	.enable_streams		= max96724_enable_streams,
 	.disable_streams	= max96724_disable_streams,
 };
@@ -1337,8 +1363,11 @@ static void max96724_notify_unbind(struct v4l2_async_notifier *notifier,
 }
 
 static const struct v4l2_subdev_ops max96724_v4l2_ops = {
-	.video = &max96724_v4l2_video_ops,
 	.pad = &max96724_v4l2_pad_ops,
+};
+
+static const struct v4l2_subdev_internal_ops max96724_internal_ops = {
+	.init_state = max96724_init_state,
 };
 
 static const struct v4l2_async_notifier_operations max96724_notify_ops = {
@@ -1416,6 +1445,7 @@ static int max96724_v4l2_init(struct max96724_priv *priv)
 	sd->ctrl_handler = &priv->ctrl_handler;
 	sd->entity.function = MEDIA_ENT_F_VID_IF_BRIDGE;
 	sd->entity.ops = &max96724_v4l2_media_ops;
+	sd->internal_ops = &max96724_internal_ops;
 
 	priv->pixrate_ctrl = v4l2_ctrl_new_std(&priv->ctrl_handler, &max96724_v4l2_ctrl_ops,
 					       V4L2_CID_PIXEL_RATE, 1, INT_MAX, 1, 50000000);
@@ -1492,9 +1522,13 @@ static int max96724_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, priv);
 
-	ret = devm_regulator_get_enable_optional(dev, "v12p0");
-	if (ret < 0 && ret != -ENODEV)
+	/* Initialize regulator supplies */
+	ret = devm_regulator_bulk_get_enable(dev, ARRAY_SIZE(max96724_supplies),
+					     max96724_supplies);
+	if (ret < 0) {
+		dev_err(dev, "Failed to get and enable regulators: %d\n", ret);
 		return ret;
+	}
 
 	priv->reset_gpio = of_get_named_gpio(dev->of_node, "rst-gpios", 0);
 	if (gpio_is_valid(priv->reset_gpio)) {

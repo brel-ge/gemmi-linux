@@ -13,9 +13,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <dt-bindings/gpio/gpio.h>
-#include <dt-bindings/phy/phy-imx8-pcie.h>
-
 /dts-v1/;
 /plugin/;
 
@@ -62,11 +59,11 @@
 		};
 	};
 
-	/* Enable PCIE clock */
+	/* Enable PCIe reference clock input */
 	fragment@4 {
-		target = <&phyx1>;
+		target = <&hsio_phy>;
 		__overlay__ {
-			fsl,refclk-pad-mode = <IMX8_PCIE_REFCLK_PAD_INPUT>;
+			fsl,refclk-pad-mode = "input";
 			status = "okay";
 		};
 	};
