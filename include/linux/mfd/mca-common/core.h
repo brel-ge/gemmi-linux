@@ -168,7 +168,8 @@ void mca_device_exit(struct mca_drv *mca);
 void mca_irq_exit(struct mca_drv *mca);
 int mca_suspend(struct device *dev);
 int mca_resume(struct device *dev);
-
+int mca_read_block(struct mca_drv *mca, u16 addr, u8 *data, size_t nregs);
+int mca_write_block(struct mca_drv *mca, u16 addr, u8 *data, size_t nregs);
 
 #if defined(CONFIG_MFD_MCA_CC8X)
 /* Functions specific to the cc8x */

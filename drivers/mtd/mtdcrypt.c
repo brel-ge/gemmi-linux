@@ -559,7 +559,7 @@ out:
  * @len Number of elements in the output array
 */
 #define STR_HEX_CHUNK			8
-void strtohex(char *in, unsigned long *out, int len)
+static void strtohex(char *in, unsigned long *out, int len)
 {
 	char tmp[] = "ffffffff";
 	int i, j;

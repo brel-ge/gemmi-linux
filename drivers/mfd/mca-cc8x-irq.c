@@ -275,7 +275,7 @@ static inline int read_sub_irq_data(struct regmap_irq_chip_data *data,
 {
 	const struct regmap_irq_chip *chip = data->chip;
 	struct regmap *map = data->map;
-	struct regmap_irq_sub_irq_map *subreg;
+	const struct regmap_irq_sub_irq_map *subreg;
 	int i, ret = 0;
 
 	if (!chip->sub_reg_offsets) {
@@ -296,7 +296,7 @@ static inline int read_sub_irq_data(struct regmap_irq_chip_data *data,
 	return ret;
 }
 
-int mca_cc8x_irq_thread(void *d)
+static int mca_cc8x_irq_thread(void *d)
 {
 	struct regmap_irq_chip_data *data = d;
 	const struct regmap_irq_chip *chip = data->chip;

@@ -54,9 +54,9 @@ struct mca_adc {
 	int irq;
 };
 
-int mca_adc_read_raw(struct iio_dev *indio_dev,
-		     struct iio_chan_spec const *channel, int *value,
-		     int *shift, long mask)
+static int mca_adc_read_raw(struct iio_dev *indio_dev,
+			    struct iio_chan_spec const *channel, int *value,
+			    int *shift, long mask)
 {
 	struct mca_adc *adc = iio_priv(indio_dev);
 	const int val_reg = MCA_REG_ADC_VAL_L_0 + channel->channel * 2;

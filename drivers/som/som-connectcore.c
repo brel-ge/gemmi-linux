@@ -10,6 +10,7 @@
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/soc/digi/som.h>
 #include <linux/sys_soc.h>
 
 static int digi_board_version = -EINVAL;

@@ -270,7 +270,7 @@ static irqreturn_t fusion_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-const static u8* g_ver_product[4] = {
+static const u8 *g_ver_product[4] = {
 	"10Z8", "70Z7", "43Z6", ""
 };
 
@@ -492,4 +492,3 @@ module_exit(fusion_exit);
 
 MODULE_DESCRIPTION("Fusion Touchscreen Driver");
 MODULE_LICENSE("GPL");
-

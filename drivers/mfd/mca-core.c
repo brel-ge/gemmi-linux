@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
+#include <linux/soc/digi/som.h>
 #include <linux/suspend.h>
 #include <linux/pm_runtime.h>
 #include <linux/proc_fs.h>
@@ -31,8 +32,6 @@
 #include <linux/unaligned.h>
 
 #define MCA_NVRAM_SIZE	(MCA_MPU_NVRAM_END - MCA_MPU_NVRAM_START + 1)
-
-extern int digi_get_som_hv(void);
 
 struct mca_reason {
 	u64 		flag;
@@ -477,7 +476,7 @@ int mca_read_block(struct mca_drv *mca, u16 addr, u8 *data,
 EXPORT_SYMBOL_GPL(mca_read_block);
 
 /* Write a block of data into MCA registers */
-int mca_write_block(struct mca_drv *mca , u16 addr, u8 *data,
+int mca_write_block(struct mca_drv *mca, u16 addr, u8 *data,
 			  size_t nregs)
 {
 	u8 *frame;	/* register address + payload */

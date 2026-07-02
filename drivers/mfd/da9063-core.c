@@ -252,7 +252,7 @@ static int da9063_clear_fault_log(struct da9063 *da9063)
 	return ret;
 }
 
-int da9063_dump(struct da9063 *da9063)
+static int __maybe_unused da9063_dump(struct da9063 *da9063)
 {
 	int j = 0;
 	int i, ret;
