@@ -17,6 +17,10 @@ struct brcmf_pub;
 struct brcmf_if;
 struct brcmf_cfg80211_info;
 
+#define BRCMF_ABSTRACT_EVENT_BIT	BIT(31)
+#define BRCMF_ABSTRACT_ENUM_DEF(_id, _val) \
+	BRCMF_ENUM_DEF(_id, (BRCMF_ABSTRACT_EVENT_BIT | (_val)))
+
 /* list of firmware events */
 #define BRCMF_FWEH_EVENT_ENUM_DEFLIST \
 	BRCMF_ENUM_DEF(SET_SSID, 0) \
@@ -89,21 +93,12 @@ struct brcmf_cfg80211_info;
 	BRCMF_ENUM_DEF(DCS_REQUEST, 73) \
 	BRCMF_ENUM_DEF(FIFO_CREDIT_MAP, 74) \
 	BRCMF_ENUM_DEF(ACTION_FRAME_RX, 75) \
-	BRCMF_ENUM_DEF(SA_COMPLETE_IND, 80) \
-	BRCMF_ENUM_DEF(ASSOC_REQ_IE, 87) \
-	BRCMF_ENUM_DEF(ASSOC_RESP_IE, 88) \
 	BRCMF_ENUM_DEF(TDLS_PEER_EVENT, 92) \
-	BRCMF_ENUM_DEF(PHY_TEMP, 111) \
 	BRCMF_ENUM_DEF(BCMC_CREDIT_SUPPORT, 127) \
-	BRCMF_ENUM_DEF(ULP, 146) \
-	BRCMF_ENUM_DEF(TWT_SETUP, 157) \
-	BRCMF_ENUM_DEF(EXT_AUTH_REQ, 187) \
-	BRCMF_ENUM_DEF(EXT_AUTH_FRAME_RX, 188) \
-	BRCMF_ENUM_DEF(MGMT_FRAME_TXSTATUS, 189) \
-	BRCMF_ENUM_DEF(MGMT_FRAME_OFF_CHAN_COMPLETE, 190) \
-	BRCMF_ENUM_DEF(TWT_TEARDOWN, 195) \
-	BRCMF_ENUM_DEF(EXT_ASSOC_FRAME_RX, 196) \
-	BRCMF_ENUM_DEF(ICMP_ECHO_REQ, 202)
+	BRCMF_ABSTRACT_ENUM_DEF(EXT_AUTH_REQ, 0) \
+	BRCMF_ABSTRACT_ENUM_DEF(EXT_AUTH_FRAME_RX, 1) \
+	BRCMF_ABSTRACT_ENUM_DEF(MGMT_FRAME_TXSTATUS, 2) \
+	BRCMF_ABSTRACT_ENUM_DEF(MGMT_FRAME_OFFCHAN_DONE, 3)
 
 #define BRCMF_ENUM_DEF(id, val) \
 	BRCMF_E_##id = (val),
@@ -111,15 +106,8 @@ struct brcmf_cfg80211_info;
 /* firmware event codes sent by the dongle */
 enum brcmf_fweh_event_code {
 	BRCMF_FWEH_EVENT_ENUM_DEFLIST
-	/* this determines event mask length which must match
-	 * minimum length check in device firmware so it is
-	 * hard-coded here.
-	 */
-	BRCMF_E_LAST = 203
 };
 #undef BRCMF_ENUM_DEF
-
-#define BRCMF_EVENTING_MASK_LEN		DIV_ROUND_UP(BRCMF_E_LAST, 8)
 
 /* flags field values in struct brcmf_event_msg */
 #define BRCMF_EVENT_MSG_LINK		0x01
@@ -155,26 +143,19 @@ enum brcmf_fweh_event_code {
 #define BRCMF_E_STATUS_FWSUP_PREP_G2		11
 
 /* reason field values in struct brcmf_event_msg */
-/* roam reason codes */
-#define BRCMF_E_REASON_INITIAL_ASSOC      0       /* initial assoc */
-#define BRCMF_E_REASON_LOW_RSSI           1       /* roamed due to low RSSI */
-#define BRCMF_E_REASON_DEAUTH             2       /* roamed due to DEAUTH indication */
-#define BRCMF_E_REASON_DISASSOC           3       /* roamed due to DISASSOC indication */
-#define BRCMF_E_REASON_BCNS_LOST          4       /* roamed due to lost beacons */
-#define BRCMF_E_REASON_FAST_ROAM_FAILED   5       /* roamed due to fast roam failure */
-#define BRCMF_E_REASON_DIRECTED_ROAM      6       /* roamed due to request by AP */
-#define BRCMF_E_REASON_TSPEC_REJECTED     7       /* roamed due to TSPEC rejection */
-#define BRCMF_E_REASON_BETTER_AP          8       /* roamed due to finding better AP */
-#define BRCMF_E_REASON_MINTXRATE          9       /* roamed because at mintxrate for too long */
-#define BRCMF_E_REASON_TXFAIL             10      /* We can hear AP, but AP can't hear us */
-#define BRCMF_E_REASON_BSSTRANS_REQ       11      /* roamed due to BSS Transition request by AP */
-#define BRCMF_E_REASON_LOW_RSSI_CU        12      /* roamed due to low RSSI and Channel Usage */
-#define BRCMF_E_REASON_RADAR_DETECTED     13      /* roamed due to radar detection by STA */
-#define BRCMF_E_REASON_CSA                14      /* roamed due to CSA from AP */
-#define BRCMF_E_REASON_ESTM_LOW           15	  /* roamed due to ESTM low tput */
-#define BRCMF_E_REASON_LAST               16
+#define BRCMF_E_REASON_INITIAL_ASSOC		0
+#define BRCMF_E_REASON_LOW_RSSI			1
+#define BRCMF_E_REASON_DEAUTH			2
+#define BRCMF_E_REASON_DISASSOC			3
+#define BRCMF_E_REASON_BCNS_LOST		4
+#define BRCMF_E_REASON_MINTXRATE		9
+#define BRCMF_E_REASON_TXFAIL			10
 
 #define BRCMF_E_REASON_LINK_BSSCFG_DIS		4
+#define BRCMF_E_REASON_FAST_ROAM_FAILED		5
+#define BRCMF_E_REASON_DIRECTED_ROAM		6
+#define BRCMF_E_REASON_TSPEC_REJECTED		7
+#define BRCMF_E_REASON_BETTER_AP		8
 
 #define BRCMF_E_REASON_TDLS_PEER_DISCOVERED	0
 #define BRCMF_E_REASON_TDLS_PEER_CONNECTED	1
@@ -303,36 +284,36 @@ struct brcmf_if_event {
 	u8 role;
 };
 
-enum event_msgs_ext_command {
-	EVENTMSGS_NONE		=	0,
-	EVENTMSGS_SET_BIT	=	1,
-	EVENTMSGS_RESET_BIT	=	2,
-	EVENTMSGS_SET_MASK	=	3
-};
-
-#define EVENTMSGS_VER 1
-#define EVENTMSGS_EXT_STRUCT_SIZE	offsetof(struct eventmsgs_ext, mask[0])
-
-/* len-	for SET it would be mask size from the application to the firmware */
-/*		for GET it would be actual firmware mask size */
-/* maxgetsize -	is only used for GET. indicate max mask size that the */
-/*				application can read from the firmware */
-struct eventmsgs_ext {
-	u8	ver;
-	u8	command;
-	u8	len;
-	u8	maxgetsize;
-	u8	mask[1];
-};
-
-struct roam_reason_name {
-	u32 reason;
-	char *reason_name;
-};
-
 typedef int (*brcmf_fweh_handler_t)(struct brcmf_if *ifp,
 				    const struct brcmf_event_msg *evtmsg,
 				    void *data);
+
+/**
+ * struct brcmf_fweh_event_map_item - fweh event and firmware event pair.
+ *
+ * @code: fweh event code as used by higher layers.
+ * @fwevt_code: firmware event code as used by firmware.
+ *
+ * This mapping is needed when a functionally identical event has a
+ * different numerical definition between vendors. When such mapping
+ * is needed the higher layer event code should not collide with the
+ * firmware event.
+ */
+struct brcmf_fweh_event_map_item {
+	enum brcmf_fweh_event_code code;
+	u32 fwevt_code;
+};
+
+/**
+ * struct brcmf_fweh_event_map - mapping between firmware event and fweh event.
+ *
+ * @n_items: number of mapping items.
+ * @items: array of fweh event and firmware event pairs.
+ */
+struct brcmf_fweh_event_map {
+	u32 n_items;
+	const struct brcmf_fweh_event_map_item items[] __counted_by(n_items);
+};
 
 /**
  * struct brcmf_fweh_info - firmware event handling information.
@@ -341,7 +322,16 @@ typedef int (*brcmf_fweh_handler_t)(struct brcmf_if *ifp,
  * @event_work: event worker.
  * @evt_q_lock: lock for event queue protection.
  * @event_q: event queue.
- * @evt_handler: registered event handlers.
+ * @event_mask_len: length of @event_mask used to enable firmware events.
+ * @event_mask: byte array used in 'event_msgs' iovar command.
+ * @event_map: mapping between fweh event and firmware event which
+ *	may be provided by vendor-specific module for events that need
+ *	mapping.
+ * @num_event_codes: number of firmware events supported by firmware which
+ *	does a minimum length check for the @event_mask. This value is to
+ *	be provided by vendor-specific module determining @event_mask_len
+ *	and consequently the allocation size for @event_mask.
+ * @evt_handler: event handler registry indexed by firmware event code.
  */
 struct brcmf_fweh_info {
 	struct brcmf_pub *drvr;
@@ -349,14 +339,16 @@ struct brcmf_fweh_info {
 	struct work_struct event_work;
 	spinlock_t evt_q_lock;
 	struct list_head event_q;
-	int (*evt_handler[BRCMF_E_LAST])(struct brcmf_if *ifp,
-					 const struct brcmf_event_msg *evtmsg,
-					 void *data);
+	uint event_mask_len;
+	u8 *event_mask;
+	const struct brcmf_fweh_event_map *event_map;
+	uint num_event_codes;
+	brcmf_fweh_handler_t evt_handler[] __counted_by(num_event_codes);
 };
 
 const char *brcmf_fweh_event_name(enum brcmf_fweh_event_code code);
 
-void brcmf_fweh_attach(struct brcmf_pub *drvr);
+int brcmf_fweh_attach(struct brcmf_pub *drvr);
 void brcmf_fweh_detach(struct brcmf_pub *drvr);
 int brcmf_fweh_register(struct brcmf_pub *drvr, enum brcmf_fweh_event_code code,
 			int (*handler)(struct brcmf_if *ifp,

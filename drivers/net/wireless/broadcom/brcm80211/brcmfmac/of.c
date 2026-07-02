@@ -77,8 +77,7 @@ int brcmf_of_probe(struct device *dev, enum brcmf_bus_type bus_type,
 	int irq;
 	int err;
 	u32 irqf;
-	u32 val32;
-	u16 val16;
+	u32 val;
 
 	/* Apple ARM64 platforms have their own idea of board type, passed in
 	 * via the device tree. They also have an antenna SKU parameter
@@ -129,25 +128,13 @@ int brcmf_of_probe(struct device *dev, enum brcmf_bus_type bus_type,
 	if (err)
 		brcmf_err("failed to get OF country code map (err=%d)\n", err);
 
-	if (of_get_mac_address(np, settings->mac)) {
-		struct device_node *wireless;
-		wireless = of_find_node_by_path("/wireless");
-		of_get_mac_address(wireless, settings->mac);
-		of_node_put(wireless);
-	}
+	of_get_mac_address(np, settings->mac);
 
 	if (bus_type != BRCMF_BUSTYPE_SDIO)
 		return 0;
 
-	if (of_property_read_u32(np, "brcm,drive-strength", &val32) == 0)
-		sdio->drive_strength = val32;
-
-	sdio->broken_sg_support = of_property_read_bool(np,
-			"brcm,broken_sg_support");
-	if (of_property_read_u16(np, "brcm,sd_head_align", &val16) == 0)
-		sdio->sd_head_align = val16;
-	if (of_property_read_u16(np, "brcm,sd_sgentry_align", &val16) == 0)
-		sdio->sd_sgentry_align = val16;
+	if (of_property_read_u32(np, "brcm,drive-strength", &val) == 0)
+		sdio->drive_strength = val;
 
 	/* make sure there are interrupts defined in the node */
 	if (of_irq_parse_one(np, 0, &oirq))

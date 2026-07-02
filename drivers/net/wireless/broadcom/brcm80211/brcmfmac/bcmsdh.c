@@ -46,7 +46,6 @@
 #define SDIO_4373_FUNC2_BLOCKSIZE	256
 #define SDIO_435X_FUNC2_BLOCKSIZE	256
 #define SDIO_4329_FUNC2_BLOCKSIZE	128
-#define SDIO_CYW55572_FUNC2_BLOCKSIZE	256
 /* Maximum milliseconds to wait for F2 to come up */
 #define SDIO_WAIT_F2RDY	3000
 
@@ -79,6 +78,7 @@ static irqreturn_t brcmf_sdiod_oob_irqhandler(int irq, void *dev_id)
 
 	return IRQ_HANDLED;
 }
+
 static void brcmf_sdiod_ib_irqhandler(struct sdio_func *func)
 {
 	struct brcmf_bus *bus_if = dev_get_drvdata(&func->dev);
@@ -239,40 +239,6 @@ static int brcmf_sdiod_set_backplane_window(struct brcmf_sdio_dev *sdiodev,
 		sdiodev->sbwad = bar0;
 
 	return err;
-}
-
-u8 brcmf_sdiod_func0_rb(struct brcmf_sdio_dev *sdiodev, u32 addr, int *ret)
-{
-	return brcmf_sdiod_func0_rb_ext(sdiodev, addr, ret);
-}
-
-void brcmf_sdiod_func0_wb(struct brcmf_sdio_dev *sdiodev, u32 addr, u32 data,
-			  int *ret)
-{
-	brcmf_sdiod_func0_wb_ext(sdiodev, addr, data, ret);
-}
-
-u8 brcmf_sdiod_readb(struct brcmf_sdio_dev *sdiodev, u32 addr, int *ret)
-{
-	return brcmf_sdiod_readb_ext(sdiodev, addr, ret);
-}
-
-void brcmf_sdiod_writeb(struct brcmf_sdio_dev *sdiodev, u32 addr, u32 data,
-			int *ret)
-{
-	brcmf_sdiod_writeb_ext(sdiodev, addr, data, ret);
-}
-
-u8 brcmf_sdiod_func_rb(struct brcmf_sdio_dev *sdiodev, struct sdio_func *func,
-		       u32 addr, int *ret)
-{
-	return brcmf_sdiod_func_rb_ext(func, addr, ret);
-}
-
-void brcmf_sdiod_func_wb(struct brcmf_sdio_dev *sdiodev, struct sdio_func *func,
-			 u32 addr, u32 data, int *ret)
-{
-	brcmf_sdiod_func_wb_ext(func, addr, data, ret);
 }
 
 u32 brcmf_sdiod_readl(struct brcmf_sdio_dev *sdiodev, u32 addr, int *ret)
@@ -575,25 +541,6 @@ int brcmf_sdiod_recv_buf(struct brcmf_sdio_dev *sdiodev, u8 *buf, uint nbytes)
 	return err;
 }
 
-int brcmf_sdiod_recv_buf_fn(struct brcmf_sdio_dev *sdiodev, u8 fn, u8 *buf,
-			    uint nbytes)
-{
-	struct sdio_func *func;
-	int err;
-
-	if (fn == SDIO_FUNC_2)
-		return brcmf_sdiod_recv_buf(sdiodev, buf, nbytes);
-	if (fn != SDIO_FUNC_3 || !sdiodev->func3)
-		return -EINVAL;
-
-	func = sdiodev->func3;
-	err = brcmf_sdiod_set_backplane_window(sdiodev, sdiodev->cc_core->base);
-	if (err)
-		return err;
-
-	return sdio_memcpy_fromio(func, buf, 0, nbytes);
-}
-
 int brcmf_sdiod_recv_pkt(struct brcmf_sdio_dev *sdiodev, struct sk_buff *pkt)
 {
 	u32 addr = sdiodev->cc_core->base;
@@ -685,25 +632,6 @@ out:
 	brcmu_pkt_buf_free_skb(mypkt);
 
 	return err;
-}
-
-int brcmf_sdiod_send_buf_fn(struct brcmf_sdio_dev *sdiodev, u8 fn, u8 *buf,
-			    uint nbytes)
-{
-	struct sdio_func *func;
-	int err;
-
-	if (fn == SDIO_FUNC_2)
-		return brcmf_sdiod_send_buf(sdiodev, buf, nbytes);
-	if (fn != SDIO_FUNC_3 || !sdiodev->func3)
-		return -EINVAL;
-
-	func = sdiodev->func3;
-	err = brcmf_sdiod_set_backplane_window(sdiodev, sdiodev->cc_core->base);
-	if (err)
-		return err;
-
-	return sdio_memcpy_toio(func, 0, buf, nbytes);
 }
 
 int brcmf_sdiod_send_pkt(struct brcmf_sdio_dev *sdiodev,
@@ -994,9 +922,6 @@ int brcmf_sdiod_probe(struct brcmf_sdio_dev *sdiodev)
 	case SDIO_DEVICE_ID_BROADCOM_4329:
 		f2_blksz = SDIO_4329_FUNC2_BLOCKSIZE;
 		break;
-	case SDIO_DEVICE_ID_CYPRESS_55572:
-		f2_blksz = SDIO_CYW55572_FUNC2_BLOCKSIZE;
-		break;
 	default:
 		break;
 	}
@@ -1074,9 +999,8 @@ static const struct sdio_device_id brcmf_sdmmc_ids[] = {
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_43752, WCC),
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_CYPRESS_4373, CYW),
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_CYPRESS_43012, CYW),
-	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_CYPRESS_89459, CYW),
+	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_CYPRESS_89359, CYW),
 	CYW_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_CYPRESS_43439, CYW),
-	CYW_SDIO_DEVICE(SDIO_DEVICE_ID_CYPRESS_55572, CYW),
 	{ /* end: all zeroes */ }
 };
 MODULE_DEVICE_TABLE(sdio, brcmf_sdmmc_ids);
@@ -1341,3 +1265,4 @@ void brcmf_sdio_exit(void)
 
 	sdio_unregister_driver(&brcmf_sdmmc_driver);
 }
+

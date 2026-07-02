@@ -35,7 +35,6 @@
 #include "core.h"
 #include "common.h"
 #include "bcdc.h"
-#include "trxhdr.h"
 
 #define DCMD_RESP_TIMEOUT	msecs_to_jiffies(2500)
 #define CTL_DONE_TIMEOUT	msecs_to_jiffies(2500)
@@ -58,10 +57,6 @@
 				 SBSDIO_MESBUSYCTRL_ENAB)
 #define CY_435X_F2_WATERMARK	0x40
 #define CY_435X_F1_MESBUSYCTRL	(CY_435X_F2_WATERMARK | \
-				 SBSDIO_MESBUSYCTRL_ENAB)
-#define CYW55572_F2_WATERMARK	0x40
-#define CYW55572_MES_WATERMARK	0x40
-#define CYW55572_F1_MESBUSYCTRL	(CYW55572_MES_WATERMARK | \
 				 SBSDIO_MESBUSYCTRL_ENAB)
 
 #ifdef DEBUG
@@ -161,8 +156,6 @@ struct rte_console {
 #define SBSDIO_DEVCTL_RST_BPRESET	0x10
 /*   Force no backplane reset */
 #define SBSDIO_DEVCTL_RST_NOBPRESET	0x20
-/* Reset SB address to default value */
-#define SBSDIO_DEVCTL_ADDR_RESET	0x40
 
 /* direct(mapped) cis space */
 
@@ -632,7 +625,6 @@ BRCMF_FW_DEF(4359, "brcmfmac4359-sdio");
 BRCMF_FW_CLM_DEF(4373, "brcmfmac4373-sdio");
 BRCMF_FW_CLM_DEF(43012, "brcmfmac43012-sdio");
 BRCMF_FW_CLM_DEF(43752, "brcmfmac43752-sdio");
-CY_FW_TRXSE_DEF(55572, "cyfmac55572-sdio");
 
 /* firmware config files */
 MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-sdio.*.txt");
@@ -667,7 +659,6 @@ static const struct brcmf_firmware_mapping brcmf_sdio_fwnames[] = {
 	BRCMF_FW_ENTRY(CY_CC_4373_CHIP_ID, 0xFFFFFFFF, 4373),
 	BRCMF_FW_ENTRY(CY_CC_43012_CHIP_ID, 0xFFFFFFFF, 43012),
 	BRCMF_FW_ENTRY(CY_CC_43439_CHIP_ID, 0xFFFFFFFF, 43439),
-	BRCMF_FW_ENTRY(CY_CC_55572_CHIP_ID, 0xFFFFFFFF, 55572),
 };
 
 #define TXCTL_CREDITS	2
@@ -3353,54 +3344,21 @@ brcmf_sdio_verifymemory(struct brcmf_sdio_dev *sdiodev, u32 ram_addr,
 }
 #endif	/* DEBUG */
 
-#define TRX_HDR_START_ADDR	0x7fd4c
-#define TRX_HDR_SZ		0x2b4
-
 static int brcmf_sdio_download_code_file(struct brcmf_sdio *bus,
 					 const struct firmware *fw)
 {
-	struct trx_header_le *trx = (struct trx_header_le *)fw->data;
-	u32 fw_size;
-	u32 address;
-	u8 *image = NULL;
 	int err;
 
 	brcmf_dbg(TRACE, "Enter\n");
 
-	address = bus->ci->rambase;
-	fw_size = fw->size;
-
-	if (bus->ci->blhs && bus->ci->chip == CY_CC_43022_CHIP_ID) {
-		image = (u8 *)fw->data;
-		if (trx->magic == cpu_to_le32(TRX_MAGIC)) {
-			err = brcmf_sdiod_ramrw(bus->sdiodev, true,
-						TRX_HDR_START_ADDR,
-						(u8 *)fw->data,
-						sizeof(*trx));
-			if (err)
-				return err;
-			fw_size -= sizeof(*trx);
-			image = (u8 *)fw->data + TRX_HDR_SZ;
-		}
-	} else {
-		image = (u8 *)fw->data;
-		if (trx->magic == cpu_to_le32(TRX_MAGIC)) {
-			if ((trx->flag_version >> 16) == TRX_VERSION5)
-				address -= sizeof(struct trxv5_header_le);
-			else
-				address -= sizeof(*trx);
-			fw_size = le32_to_cpu(trx->len);
-		}
-	}
-
-	err = brcmf_sdiod_ramrw(bus->sdiodev, true, address, image, fw_size);
-	if (err) {
+	err = brcmf_sdiod_ramrw(bus->sdiodev, true, bus->ci->rambase,
+				(u8 *)fw->data, fw->size);
+	if (err)
 		brcmf_err("error %d on writing %d membytes at 0x%08x\n",
-			  err, (int)fw_size, address);
-	} else if (!brcmf_sdio_verifymemory(bus->sdiodev, address, image,
-					    fw_size)) {
+			  err, (int)fw->size, bus->ci->rambase);
+	else if (!brcmf_sdio_verifymemory(bus->sdiodev, bus->ci->rambase,
+					  (u8 *)fw->data, fw->size))
 		err = -EIO;
-	}
 
 	return err;
 }
@@ -3437,38 +3395,12 @@ static int brcmf_sdio_download_firmware(struct brcmf_sdio *bus,
 	rstvec = get_unaligned_le32(fw->data);
 	brcmf_dbg(SDIO, "firmware rstvec: %x\n", rstvec);
 
-	if (bus->ci->blhs) {
-		bcmerror = bus->ci->blhs->prep_fwdl(bus->ci);
-		if (bcmerror) {
-			brcmf_err("FW download preparation failed\n");
-			release_firmware(fw);
-			brcmf_fw_nvram_free(nvram);
-			goto err;
-		}
-	}
-
 	bcmerror = brcmf_sdio_download_code_file(bus, fw);
 	release_firmware(fw);
 	if (bcmerror) {
 		brcmf_err("dongle image file download failed\n");
 		brcmf_fw_nvram_free(nvram);
 		goto err;
-	}
-
-	if (bus->ci->blhs) {
-		bcmerror = bus->ci->blhs->post_fwdl(bus->ci);
-		if (bcmerror) {
-			brcmf_err("FW download failed, err=%d\n", bcmerror);
-			brcmf_fw_nvram_free(nvram);
-			goto err;
-		}
-
-		bcmerror = bus->ci->blhs->chk_validation(bus->ci);
-		if (bcmerror) {
-			brcmf_err("FW validation failed, err=%d\n", bcmerror);
-			brcmf_fw_nvram_free(nvram);
-			goto err;
-		}
 	}
 
 	bcmerror = brcmf_sdio_download_nvram(bus, nvram, nvlen);
@@ -3478,15 +3410,11 @@ static int brcmf_sdio_download_firmware(struct brcmf_sdio *bus,
 		goto err;
 	}
 
-	if (bus->ci->blhs) {
-		bus->ci->blhs->post_nvramdl(bus->ci);
-	} else {
-		/* Take arm out of reset */
-		if (!brcmf_chip_set_active(bus->ci, rstvec)) {
-			brcmf_err("error getting out of ARM core reset\n");
-			bcmerror = -EIO;
-			goto err;
-		}
+	/* Take arm out of reset */
+	if (!brcmf_chip_set_active(bus->ci, rstvec)) {
+		brcmf_err("error getting out of ARM core reset\n");
+		bcmerror = -EIO;
+		goto err;
 	}
 
 err:
@@ -3499,16 +3427,10 @@ static bool brcmf_sdio_aos_no_decode(struct brcmf_sdio *bus)
 {
 	if (bus->ci->chip == BRCM_CC_43751_CHIP_ID ||
 	    bus->ci->chip == BRCM_CC_43752_CHIP_ID ||
-	    bus->ci->chip == CY_CC_43012_CHIP_ID ||
-	    bus->ci->chip == CY_CC_55572_CHIP_ID)
+	    bus->ci->chip == CY_CC_43012_CHIP_ID)
 		return true;
 	else
 		return false;
-}
-
-static bool brcmf_sdio_use_ht_avail(struct brcmf_chip *ci)
-{
-	return ci->chip == CY_CC_55572_CHIP_ID;
 }
 
 static void brcmf_sdio_sr_init(struct brcmf_sdio *bus)
@@ -3521,7 +3443,7 @@ static void brcmf_sdio_sr_init(struct brcmf_sdio *bus)
 
 	brcmf_dbg(TRACE, "Enter\n");
 
-	if (brcmf_chip_is_ulp(bus->ci) || brcmf_sdio_use_ht_avail(bus->ci)) {
+	if (brcmf_chip_is_ulp(bus->ci)) {
 		wakeupctrl = SBSDIO_FUNC1_WCTRL_ALPWAIT_SHIFT;
 		chipclkcsr = SBSDIO_HT_AVAIL_REQ;
 	} else {
@@ -4016,167 +3938,11 @@ static void brcmf_sdio_buscore_write32(void *ctx, u32 addr, u32 val)
 	brcmf_sdiod_writel(sdiodev, addr, val, NULL);
 }
 
-static u32 brcmf_sdio_ccsec_get_buscorebase(struct brcmf_sdio_dev *sdiodev)
-{
-	u8 devctl;
-	u32 addr = 0;
-	int err = 0;
-
-	devctl = brcmf_sdiod_readb(sdiodev, SBSDIO_DEVICE_CTL, NULL);
-	brcmf_sdiod_writeb(sdiodev, SBSDIO_DEVICE_CTL,
-			   devctl | SBSDIO_DEVCTL_ADDR_RESET, &err);
-	if (err)
-		goto exit;
-
-	addr |= brcmf_sdiod_readb(sdiodev, SBSDIO_FUNC1_SBADDRLOW, NULL) << 8;
-	addr |= brcmf_sdiod_readb(sdiodev, SBSDIO_FUNC1_SBADDRMID, NULL) << 16;
-	addr |= brcmf_sdiod_readb(sdiodev, SBSDIO_FUNC1_SBADDRHIGH, NULL) << 24;
-
-	brcmf_dbg(INFO, "sdiod core address is 0x%x\n", addr);
-exit:
-	if (err) {
-		brcmf_err("Get SDIO core base address failed, err=%d\n", err);
-		addr = 0;
-	}
-	brcmf_sdiod_writeb(sdiodev, SBSDIO_DEVICE_CTL, devctl, &err);
-
-	return addr;
-}
-
-static u32 brcmf_sdio_buscore_blhs_read(void *ctx, u32 reg_offset)
-{
-	struct brcmf_sdio_dev *sdiodev = ctx;
-
-	return brcmf_sdiod_readb(sdiodev, reg_offset, NULL);
-}
-
-static void brcmf_sdio_buscore_blhs_write(void *ctx, u32 reg_offset, u32 value)
-{
-	struct brcmf_sdio_dev *sdiodev = ctx;
-
-	brcmf_sdiod_writeb(sdiodev, reg_offset, (u8)value, NULL);
-}
-
-static int
-brcmf_sdio_buscore_sec_attach(void *ctx, struct brcmf_blhs **blhs,
-			      struct brcmf_ccsec **ccsec, u32 flag,
-			      uint timeout, uint interval)
-{
-	struct brcmf_sdio_dev *sdiodev = ctx;
-	struct brcmf_blhs *blhsh = NULL;
-	struct brcmf_ccsec *ccsech = NULL;
-	u32 reg_addr;
-	u32 regdata;
-	u8 cardcap;
-	int err = 0;
-	int secure_mode;
-
-	if (sdiodev->func1->vendor != SDIO_VENDOR_ID_CYPRESS &&
-	    sdiodev->func1->vendor != SDIO_VENDOR_ID_BROADCOM)
-		return 0;
-
-	secure_mode = !brcmf_sdiod_readb(sdiodev, SBSDIO_FUNC1_SECURE_MODE,
-					 &err);
-	if (err)
-		brcmf_err("Failed to read SecureModeRegister = %d\n", err);
-
-	if (secure_mode) {
-		blhsh = kzalloc(sizeof(*blhsh), GFP_KERNEL);
-		if (!blhsh)
-			return -ENOMEM;
-
-		blhsh->d2h = BRCMF_SDIO_REG_D2H_MSG_0;
-		blhsh->h2d = BRCMF_SDIO_REG_H2D_MSG_0;
-		blhsh->read = brcmf_sdio_buscore_read32;
-		blhsh->write = brcmf_sdio_buscore_write32;
-
-		*blhs = blhsh;
-	}
-
-	cardcap = brcmf_sdiod_func0_rb(sdiodev, SDIO_CCCR_BRCM_CARDCAP,
-				       NULL);
-	if (cardcap & SDIO_CCCR_BRCM_CARDCAP_SECURE_MODE) {
-		kfree(blhsh);
-		blhsh = kzalloc(sizeof(*blhsh), GFP_KERNEL);
-		if (!blhsh)
-			return -ENOMEM;
-
-		blhsh->d2h = BRCMF_SDIO_REG_DAR_D2H_MSG_0;
-		blhsh->h2d = BRCMF_SDIO_REG_DAR_H2D_MSG_0;
-		blhsh->read = brcmf_sdio_buscore_blhs_read;
-		blhsh->write = brcmf_sdio_buscore_blhs_write;
-
-		blhsh->write(ctx, blhsh->h2d, 0);
-
-		SPINWAIT_MS((blhsh->read(ctx, blhsh->d2h) & flag) == 0,
-			    timeout, interval);
-
-		regdata = blhsh->read(ctx, blhsh->d2h);
-		if (!(regdata & flag)) {
-			brcmf_err("Timeout waiting for bootloader ready\n");
-			kfree(blhsh);
-			return -EPERM;
-		}
-		*blhs = blhsh;
-	}
-
-	if (cardcap & SDIO_CCCR_BRCM_CARDCAP_CHIPID_PRESENT) {
-		ccsech = kzalloc(sizeof(*ccsech), GFP_KERNEL);
-		if (!ccsech) {
-			kfree(blhsh);
-			return -ENOMEM;
-		}
-		ccsech->bus_corebase =
-			brcmf_sdio_ccsec_get_buscorebase(sdiodev);
-		reg_addr = ccsech->bus_corebase + SD_REG(eromptr);
-		ccsech->erombase = brcmf_sdio_buscore_read32(ctx, reg_addr);
-		reg_addr = ccsech->bus_corebase + SD_REG(chipid);
-		ccsech->chipid = brcmf_sdio_buscore_read32(ctx, reg_addr);
-		*ccsec = ccsech;
-	}
-
-	return 0;
-}
-
-#define LOOP_TO_CHECK_FOR_BP_ENABLE 50000
-
-static int brcmf_get_intr_pending_data(void *ctx)
-{
-	struct brcmf_sdio_dev *sdiodev = ctx;
-	int loop;
-	int status = 0;
-	int err = 0;
-	u32 reg_val = 0;
-
-	for (loop = 0; loop < LOOP_TO_CHECK_FOR_BP_ENABLE; loop++) {
-		sdio_claim_host(sdiodev->func1);
-		reg_val = brcmf_sdiod_func0_rb(sdiodev, SDIO_CCCR_INTx, &err);
-		sdio_release_host(sdiodev->func1);
-		status = reg_val & INTR_STATUS_FUNC1;
-
-		if (status) {
-			brcmf_dbg(INFO, "[%d]: Backplane enabled.\n", loop);
-			break;
-		}
-		udelay(10);
-	}
-
-	if (loop == LOOP_TO_CHECK_FOR_BP_ENABLE) {
-		err = -EBUSY;
-		brcmf_err("Device hung, return failure. time out %d ms\n",
-			  (LOOP_TO_CHECK_FOR_BP_ENABLE * 10) / 1000);
-	}
-
-	return err;
-}
-
 static const struct brcmf_buscore_ops brcmf_sdio_buscore_ops = {
 	.prepare = brcmf_sdio_buscoreprep,
 	.activate = brcmf_sdio_buscore_activate,
 	.read32 = brcmf_sdio_buscore_read32,
 	.write32 = brcmf_sdio_buscore_write32,
-	.sec_attach = brcmf_sdio_buscore_sec_attach,
-	.get_intr_pend = brcmf_get_intr_pending_data,
 };
 
 static int
@@ -4290,21 +4056,17 @@ brcmf_sdio_probe_attach(struct brcmf_sdio *bus)
 	if (err)
 		goto fail;
 
-	if (!bus->ci->blhs) {
-		/* set PMUControl so a backplane reset does PMU state reload */
-		reg_addr = CORE_CC_REG(brcmf_chip_get_pmu(bus->ci)->base,
-				       pmucontrol);
-		reg_val = brcmf_sdiod_readl(sdiodev, reg_addr, &err);
-		if (err)
-			goto fail;
+	/* set PMUControl so a backplane reset does PMU state reload */
+	reg_addr = CORE_CC_REG(brcmf_chip_get_pmu(bus->ci)->base, pmucontrol);
+	reg_val = brcmf_sdiod_readl(sdiodev, reg_addr, &err);
+	if (err)
+		goto fail;
 
-		reg_val |= (BCMA_CC_PMU_CTL_RES_RELOAD <<
-			    BCMA_CC_PMU_CTL_RES_SHIFT);
+	reg_val |= (BCMA_CC_PMU_CTL_RES_RELOAD << BCMA_CC_PMU_CTL_RES_SHIFT);
 
-		brcmf_sdiod_writel(sdiodev, reg_addr, reg_val, &err);
-		if (err)
-			goto fail;
-	}
+	brcmf_sdiod_writel(sdiodev, reg_addr, reg_val, &err);
+	if (err)
+		goto fail;
 
 	sdio_release_host(sdiodev->func1);
 
@@ -4489,8 +4251,7 @@ static void brcmf_sdio_firmware_callback(struct device *dev, int err,
 	saveclk = brcmf_sdiod_readb(sdiod, SBSDIO_FUNC1_CHIPCLKCSR, &err);
 	if (!err) {
 		bpreq = saveclk;
-		bpreq |= (brcmf_sdio_use_ht_avail(bus->ci) ||
-			  brcmf_chip_is_ulp(bus->ci)) ?
+		bpreq |= brcmf_chip_is_ulp(bus->ci) ?
 			SBSDIO_HT_AVAIL_REQ : SBSDIO_FORCE_HT;
 		brcmf_sdiod_writeb(sdiod, SBSDIO_FUNC1_CHIPCLKCSR,
 				   bpreq, &err);
@@ -4530,19 +4291,6 @@ static void brcmf_sdio_firmware_callback(struct device *dev, int err,
 					   &err);
 			brcmf_sdiod_writeb(sdiod, SBSDIO_FUNC1_MESBUSYCTRL,
 					   CY_4373_F1_MESBUSYCTRL, &err);
-			break;
-		case SDIO_DEVICE_ID_CYPRESS_55572:
-			brcmf_dbg(INFO, "set F2 watermark to 0x%x*4 bytes\n",
-				  CYW55572_F2_WATERMARK);
-			brcmf_sdiod_writeb(sdiod, SBSDIO_WATERMARK,
-					   CYW55572_F2_WATERMARK, &err);
-			devctl = brcmf_sdiod_readb(sdiod, SBSDIO_DEVICE_CTL,
-						   &err);
-			devctl |= SBSDIO_DEVCTL_F2WM_ENAB;
-			brcmf_sdiod_writeb(sdiod, SBSDIO_DEVICE_CTL, devctl,
-					   &err);
-			brcmf_sdiod_writeb(sdiod, SBSDIO_FUNC1_MESBUSYCTRL,
-					   CYW55572_F1_MESBUSYCTRL, &err);
 			break;
 		case SDIO_DEVICE_ID_BROADCOM_CYPRESS_43012:
 			brcmf_dbg(INFO, "set F2 watermark to 0x%x*4 bytes\n",
@@ -4648,7 +4396,7 @@ static void brcmf_sdio_firmware_callback(struct device *dev, int err,
 	}
 
 	/* Attach to the common layer, reserve hdr space */
-	err = brcmf_attach(sdiod->dev, true);
+	err = brcmf_attach(sdiod->dev);
 	if (err != 0) {
 		brcmf_err("brcmf_attach failed\n");
 		goto free;
@@ -4675,30 +4423,11 @@ static struct brcmf_fw_request *
 brcmf_sdio_prepare_fw_request(struct brcmf_sdio *bus)
 {
 	struct brcmf_fw_request *fwreq;
-	struct brcmf_fw_name fwnames[3];
-
-	if (bus->ci->blhs) {
-		if (bus->ci->chip == CY_CC_43022_CHIP_ID)
-			fwnames[0].extension = ".trxs";
-		else if (bus->ci->chip == CY_CC_55500_CHIP_ID ||
-			 bus->ci->chip == CY_CC_55572_CHIP_ID)
-			fwnames[0].extension = ".trxse";
-		else
-			brcmf_err("unexpected chip 0x%x with blhs\n",
-				  bus->ci->chip);
-	} else {
-		if (bus->ci->chip == CY_CC_55500_CHIP_ID ||
-		    bus->ci->chip == CY_CC_55572_CHIP_ID)
-			fwnames[0].extension = ".trx";
-		else
-			fwnames[0].extension = ".bin";
-	}
-
-	fwnames[0].path = bus->sdiodev->fw_name;
-	fwnames[1].extension = ".txt";
-	fwnames[1].path = bus->sdiodev->nvram_name;
-	fwnames[2].extension = ".clm_blob";
-	fwnames[2].path = bus->sdiodev->clm_name;
+	struct brcmf_fw_name fwnames[] = {
+		{ ".bin", bus->sdiodev->fw_name },
+		{ ".txt", bus->sdiodev->nvram_name },
+		{ ".clm_blob", bus->sdiodev->clm_name },
+	};
 
 	fwreq = brcmf_fw_alloc_request(bus->ci->chip, bus->ci->chiprev,
 				       brcmf_sdio_fwnames,
@@ -4707,16 +4436,7 @@ brcmf_sdio_prepare_fw_request(struct brcmf_sdio *bus)
 	if (!fwreq)
 		return NULL;
 
-	if (bus->ci->blhs) {
-		if (bus->ci->chip == CY_CC_43022_CHIP_ID)
-			fwreq->items[BRCMF_SDIO_FW_CODE].type =
-				BRCMF_FW_TYPE_TRXS;
-		else
-			fwreq->items[BRCMF_SDIO_FW_CODE].type =
-				BRCMF_FW_TYPE_TRXSE;
-	} else {
-		fwreq->items[BRCMF_SDIO_FW_CODE].type = BRCMF_FW_TYPE_BINARY;
-	}
+	fwreq->items[BRCMF_SDIO_FW_CODE].type = BRCMF_FW_TYPE_BINARY;
 	fwreq->items[BRCMF_SDIO_FW_NVRAM].type = BRCMF_FW_TYPE_NVRAM;
 	fwreq->items[BRCMF_SDIO_FW_CLM].type = BRCMF_FW_TYPE_BINARY;
 	fwreq->items[BRCMF_SDIO_FW_CLM].flags = BRCMF_FW_REQF_OPTIONAL;

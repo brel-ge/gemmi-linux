@@ -13,8 +13,6 @@
 
 #define BRCMF_FW_MAX_BOARD_TYPES	8
 
-#define CY_FW_DEFAULT_PATH		"cypress/"
-
 /**
  * struct brcmf_firmware_mapping - Used to map chipid/revmask to firmware
  *	filename and nvram filename. Each bus type implementation should create
@@ -43,21 +41,6 @@ static const char BRCM_ ## fw_name ## _FIRMWARE_BASENAME[] = \
 MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH fw_base ".bin"); \
 MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH fw_base ".clm_blob")
 
-#define CY_FW_BL_DEF(bl_name, fw_base) \
-static const char BRCM_ ## bl_name ## _FIRMWARE_BASENAME[] = \
-	CY_FW_DEFAULT_PATH fw_base; \
-MODULE_FIRMWARE(CY_FW_DEFAULT_PATH fw_base ".bin")
-
-#define CY_FW_DEF(fw_name, fw_base) \
-static const char BRCM_ ## fw_name ## _FIRMWARE_BASENAME[] = \
-	CY_FW_DEFAULT_PATH fw_base; \
-MODULE_FIRMWARE(CY_FW_DEFAULT_PATH fw_base ".trxs")
-
-#define CY_FW_TRXSE_DEF(fw_name, fw_base) \
-static const char BRCM_ ## fw_name ## _FIRMWARE_BASENAME[] = \
-	CY_FW_DEFAULT_PATH fw_base; \
-MODULE_FIRMWARE(CY_FW_DEFAULT_PATH fw_base ".trxse")
-
 #define BRCMF_FW_ENTRY(chipid, mask, name) \
 	{ chipid, mask, BRCM_ ## name ## _FIRMWARE_BASENAME }
 
@@ -65,9 +48,7 @@ void brcmf_fw_nvram_free(void *nvram);
 
 enum brcmf_fw_type {
 	BRCMF_FW_TYPE_BINARY,
-	BRCMF_FW_TYPE_NVRAM,
-	BRCMF_FW_TYPE_TRXSE,
-	BRCMF_FW_TYPE_TRXS
+	BRCMF_FW_TYPE_NVRAM
 };
 
 struct brcmf_fw_item {
@@ -110,14 +91,5 @@ brcmf_fw_alloc_request(u32 chip, u32 chiprev,
 int brcmf_fw_get_firmwares(struct device *dev, struct brcmf_fw_request *req,
 			   void (*fw_cb)(struct device *dev, int err,
 					 struct brcmf_fw_request *req));
-
-/**
- * Request single firmware synchronously.
- * Callback is called on a valid request
- * whether it succeeds or not.
- */
-int brcmf_fw_get_firmware_sync(struct device *dev, struct brcmf_fw_request *req,
-			       void (*fw_cb)(struct device *dev, int err,
-					     struct brcmf_fw_request *req));
 
 #endif /* BRCMFMAC_FIRMWARE_H */
