@@ -421,6 +421,7 @@ static int mxc_gpio_probe(struct platform_device *pdev)
 	struct mxc_gpio_port *port;
 	int irq_count;
 	int irq_base;
+	int index;
 	int err;
 
 	port = devm_kzalloc(&pdev->dev, sizeof(*port), GFP_KERNEL);
@@ -491,6 +492,21 @@ static int mxc_gpio_probe(struct platform_device *pdev)
 	port->gen_gc.gc.request = mxc_gpio_request;
 	port->gen_gc.gc.free = mxc_gpio_free;
 	port->gen_gc.gc.to_irq = mxc_gpio_to_irq;
+
+	index = of_alias_get_id(np, "gpio");
+	if (index >= 0) {
+		if (!of_machine_is_compatible("fsl,imx8qxp") &&
+		    !of_machine_is_compatible("fsl,imx8dxp"))
+			index++;
+
+		port->gen_gc.gc.label = devm_kasprintf(&pdev->dev, GFP_KERNEL,
+						       "gpio%d", index);
+		if (!port->gen_gc.gc.label) {
+			err = -ENOMEM;
+			goto out_bgio;
+		}
+	}
+
 	/*
 	 * Driver is DT-only, so a fixed base needs only be maintained for legacy
 	 * userspace with sysfs interface.
