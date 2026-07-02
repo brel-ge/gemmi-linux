@@ -7,5 +7,13 @@ config SOM_CONNECTCORE
        help
          Say yes for ConnectCore embedded SoMs.
 
-endmenu
+config DIGI_QCA_WEXT_PRIV
+       bool "Digi QCA private Wireless Extensions support"
+       depends on CFG80211_WEXT
+       select WIRELESS_EXT
+       select WEXT_PRIV
+       help
+         Enable private Wireless Extensions support required by Digi's
+         external QCA Wi-Fi driver.
 
+endmenu
