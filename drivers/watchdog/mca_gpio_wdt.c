@@ -264,15 +264,13 @@ err:
 	return ret;
 }
 
-static int mca_wdt_remove(struct platform_device *pdev)
+static void mca_wdt_remove(struct platform_device *pdev)
 {
 	struct mca_wdt *wdt = platform_get_drvdata(pdev);
 
 	if(wdt->irq_timeout)
 		devm_free_irq(&pdev->dev, wdt->irq_timeout, wdt);
 	kref_put(&wdt->kref, mca_wdt_release_resources);
-
-	return 0;
 }
 
 #ifdef CONFIG_OF

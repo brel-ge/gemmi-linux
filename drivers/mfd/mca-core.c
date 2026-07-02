@@ -28,7 +28,7 @@
 
 #include <linux/mfd/mca-common/core.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define MCA_NVRAM_SIZE	(MCA_MPU_NVRAM_END - MCA_MPU_NVRAM_START + 1)
 
@@ -821,8 +821,8 @@ static ssize_t last_mpu_reset_show(struct device *dev,
 static DEVICE_ATTR(last_mpu_reset, S_IRUGO, last_mpu_reset_show, NULL);
 
 static ssize_t nvram_read(struct file *filp, struct kobject *kobj,
-			  struct bin_attribute *attr, char *buf, loff_t off,
-			  size_t count)
+			  const struct bin_attribute *attr, char *buf,
+			  loff_t off, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
 	struct mca_drv *mca;
@@ -847,8 +847,8 @@ static ssize_t nvram_read(struct file *filp, struct kobject *kobj,
 }
 
 static ssize_t nvram_write(struct file *filp, struct kobject *kobj,
-			   struct bin_attribute *attr, char *buf, loff_t off,
-			   size_t count)
+			   const struct bin_attribute *attr, char *buf,
+			   loff_t off, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
 	struct mca_drv *mca;

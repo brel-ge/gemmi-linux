@@ -14,6 +14,7 @@
 #include <linux/interrupt.h>
 #include <linux/regmap.h>
 #include <linux/mfd/mca-common/core.h>
+#include <linux/of.h>
 #include <linux/irqdomain.h>
 #include <linux/pm_runtime.h>
 #include <linux/firmware/imx/sci.h>
@@ -501,13 +502,13 @@ int mca_cc8x_add_irq_chip(struct regmap *map, int irq, int irq_base,
 	}
 
 	if (irq_base)
-		d->domain = irq_domain_add_legacy(map->dev->of_node,
-						  chip->num_irqs, irq_base, 0,
-						  &regmap_domain_ops, d);
+		d->domain = irq_domain_create_legacy(of_node_to_fwnode(map->dev->of_node),
+						     chip->num_irqs, irq_base, 0,
+						     &regmap_domain_ops, d);
 	else
-		d->domain = irq_domain_add_linear(map->dev->of_node,
-						  chip->num_irqs,
-						  &regmap_domain_ops, d);
+		d->domain = irq_domain_create_linear(of_node_to_fwnode(map->dev->of_node),
+						     chip->num_irqs,
+						     &regmap_domain_ops, d);
 	if (!d->domain) {
 		dev_err(map->dev, "Failed to create IRQ domain\n");
 		ret = -ENOMEM;

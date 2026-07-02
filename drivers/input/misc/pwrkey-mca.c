@@ -433,7 +433,7 @@ err_free:
 	return ret;
 }
 
-static int mca_pwrkey_remove(struct platform_device *pdev)
+static void mca_pwrkey_remove(struct platform_device *pdev)
 {
 	struct mca_pwrkey *pwrkey = platform_get_drvdata(pdev);
 
@@ -443,8 +443,6 @@ static int mca_pwrkey_remove(struct platform_device *pdev)
 		free_irq(pwrkey->irq_sleep, pwrkey);
 	input_unregister_device(pwrkey->input);
 	kfree(pwrkey);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

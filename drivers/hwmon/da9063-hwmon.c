@@ -353,14 +353,12 @@ static int da9063_hwmon_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int da9063_hwmon_remove(struct platform_device *pdev)
+static void da9063_hwmon_remove(struct platform_device *pdev)
 {
 	struct da9063_hwmon *hwmon = platform_get_drvdata(pdev);
 
 	hwmon_device_unregister(hwmon->class_dev);
 	sysfs_remove_group(&pdev->dev.kobj, &da9063_attr_group);
-
-	return 0;
 }
 
 #ifdef CONFIG_OF

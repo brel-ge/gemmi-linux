@@ -546,14 +546,12 @@ err:
 	return ret;
 }
 
-static int mca_rtc_remove(struct platform_device *pdev)
+static void mca_rtc_remove(struct platform_device *pdev)
 {
 	struct mca_rtc *rtc = platform_get_drvdata(pdev);
 
 	if (rtc->irq_alarm >= 0)
 		devm_free_irq(&pdev->dev, rtc->irq_alarm, rtc);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM

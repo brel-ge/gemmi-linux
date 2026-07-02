@@ -525,9 +525,9 @@ static int mca_init_hardware(struct mca_tamper *tp)
 		return -ENODEV;
 
 	if (tp->mca->gpio_base >= 0) {
-		ret = devm_gpio_request(tp->mca->dev,
-					tp->mca->gpio_base + tp->io_in,
-					"TAMPER IN");
+		ret = devm_gpio_request_one(tp->mca->dev,
+					    tp->mca->gpio_base + tp->io_in,
+					    GPIOF_IN, "TAMPER IN");
 		if (ret != 0) {
 			dev_warn(tp->mca->dev,
 				 "Error requesting GPIO %d for tamper %d input. It might be in use by other device.\n",
@@ -535,9 +535,10 @@ static int mca_init_hardware(struct mca_tamper *tp)
 		}
 
 		if (data[CFG0] & MCA_TAMPER_OUT_EN) {
-			ret = devm_gpio_request(tp->mca->dev,
-						tp->mca->gpio_base + tp->io_out,
-						"TAMPER OUT");
+			ret = devm_gpio_request_one(tp->mca->dev,
+						    tp->mca->gpio_base + tp->io_out,
+						    GPIOF_OUT_INIT_LOW,
+						    "TAMPER OUT");
 			if (ret != 0) {
 				dev_warn(tp->mca->dev,
 					 "Error requesting GPIO %d for tamper %d output. It might be in use by other device.\n",
@@ -574,8 +575,6 @@ static int mca_tamper_probe(struct platform_device *pdev)
 	struct mca_tamper **mca_tamper = NULL;
 	const struct mca_tamper_data *devdata;
 	struct device_node *np;
-	struct property *prop;
-	const __be32 *cur;
 	u32 iface;
 	int ret = 0;
 	u16 num_tamper_ifaces;
@@ -608,8 +607,7 @@ static int mca_tamper_probe(struct platform_device *pdev)
 	for (iface = 0; iface < num_tamper_ifaces; iface++)
 		mca_tamper[iface] = NULL;
 
-	of_property_for_each_u32(np, "digi,tamper-if-list",
-				 prop, cur, iface) {
+	of_property_for_each_u32(np, "digi,tamper-if-list", iface) {
 		struct iio_chan_spec *channels;
 		struct iio_dev *iiod = NULL;
 
@@ -709,10 +707,9 @@ exit_error:
 	return ret;
 }
 
-static int mca_tamper_remove(struct platform_device *pdev)
+static void mca_tamper_remove(struct platform_device *pdev)
 {
-	struct mca_tamper **mca_tamper = dev_get_drvdata(pdev->dev.parent);
-	struct mca_drv *mca;
+	struct mca_tamper **mca_tamper = platform_get_drvdata(pdev);
 	const struct mca_tamper_data *devdata = of_device_get_match_data(&pdev->dev);
 	u16 num_tamper_ifaces = devdata->num_tamper_ifaces;
 	u32 iface;
@@ -720,8 +717,8 @@ static int mca_tamper_remove(struct platform_device *pdev)
 	for (iface = 0; iface < num_tamper_ifaces; iface++) {
 		if (mca_tamper[iface] == NULL)
 			continue;
+
 		/* Release the resources allocated */
-		mca = mca_tamper[iface]->mca;
 		devm_kfree(&pdev->dev, (void *)mca_tamper[iface]->iio->channels);
 		if (mca_tamper[iface]->irq)
 			devm_free_irq(&pdev->dev, mca_tamper[iface]->irq,
@@ -730,8 +727,6 @@ static int mca_tamper_remove(struct platform_device *pdev)
 		iio_device_free(mca_tamper[iface]->iio);
 	}
 	kfree(mca_tamper);
-
-	return 0;
 }
 
 #ifdef CONFIG_OF

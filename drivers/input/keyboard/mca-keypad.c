@@ -186,12 +186,10 @@ static int mca_kp_parse_dt(struct mca_kp *kp)
 {
 	struct device *dev = kp->inpdev->dev.parent;
 	struct device_node *np = dev->of_node;
-	struct property *prop;
-	const __be32 *cur;
 	u32 io, num_ios;
 
 	num_ios = 0;
-	of_property_for_each_u32(np, "cols-io-list", prop, cur, io) {
+	of_property_for_each_u32(np, "cols-io-list", io) {
 		if (io >= MCA_MAX_IOS)
 			return -EINVAL;
 
@@ -209,7 +207,7 @@ static int mca_kp_parse_dt(struct mca_kp *kp)
 	}
 
 	num_ios = 0;
-	of_property_for_each_u32(np, "rows-io-list", prop, cur, io) {
+	of_property_for_each_u32(np, "rows-io-list", io) {
 		if (io >= MCA_MAX_IOS)
 			return -EINVAL;
 

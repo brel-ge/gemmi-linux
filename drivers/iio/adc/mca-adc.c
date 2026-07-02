@@ -22,6 +22,7 @@
 #include <linux/iio/events.h>
 #include <linux/iio/iio.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -127,8 +128,8 @@ static u64 generate_comparator_event(struct mca_adc *adc, int ch)
 	else
 		return ~0;
 
-	return IIO_EVENT_CODE(IIO_ACTIVITY, 0, IIO_NO_MOD, edge,
-			      IIO_EV_TYPE_CHANGE, ch, 0, 0);
+	return IIO_UNMOD_EVENT_CODE(IIO_ACTIVITY, ch, IIO_EV_TYPE_CHANGE,
+				    edge);
 }
 
 static irqreturn_t comparator_irq_handler(int irq, void *private)
@@ -632,8 +633,8 @@ static void init_adc_channels(struct platform_device *pdev,
 		 * used as GPIO by user space
 		 */
 		if (gpio_base >= 0) {
-			ret = devm_gpio_request(&pdev->dev, gpio_base + ch,
-						"ADC");
+			ret = devm_gpio_request_one(&pdev->dev, gpio_base + ch,
+						    GPIOF_IN, "ADC");
 			if (ret) {
 				dev_warn(&pdev->dev,
 					 "Error requesting GPIO %d. Cannot use ADC%d (%d)\n",
@@ -709,8 +710,6 @@ static int mca_adc_probe(struct platform_device *pdev)
 	u8 adc_ch_list[MCA_MAX_IOS];
 	u8 num_adcs = 0;
 	u8 num_comps = 0;
-	struct property *prop;
-	const __be32 *cur;
 	u32 ch, cfg;
 	int ret = 0;
 	u8 adc_comp_ch_list[MCA_MAX_IOS];
@@ -738,8 +737,7 @@ static int mca_adc_probe(struct platform_device *pdev)
 	mca_adc->irq = -1;
 	mca_adc->vref = get_vref(mca_dev, regmap, np);
 
-	of_property_for_each_u32(np, "digi,adc-ch-list",
-					prop, cur, ch) {
+	of_property_for_each_u32(np, "digi,adc-ch-list", ch) {
 		if (ch >= MCA_MAX_IOS)
 			continue;
 
@@ -768,8 +766,7 @@ static int mca_adc_probe(struct platform_device *pdev)
 		num_adcs++;
 	}
 
-	of_property_for_each_u32(np, "digi,comparator-ch-list",
-					prop, cur, ch) {
+	of_property_for_each_u32(np, "digi,comparator-ch-list", ch) {
 		u32 cfg;
 
 		if (ch >= MCA_MAX_IOS)
@@ -862,7 +859,7 @@ error_dev_free:
 	return ret;
 }
 
-static int mca_adc_remove(struct platform_device *pdev)
+static void mca_adc_remove(struct platform_device *pdev)
 {
 	struct mca_drv *mca = dev_get_drvdata(pdev->dev.parent);
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
@@ -870,7 +867,7 @@ static int mca_adc_remove(struct platform_device *pdev)
 
 	if (!mca) {
 		dev_err(&pdev->dev, "Received a NULL pointer in mca\n");
-		return -EINVAL;
+		return;
 	}
 
 	/* Release allocated resources */
@@ -880,8 +877,6 @@ static int mca_adc_remove(struct platform_device *pdev)
 	devm_kfree(&pdev->dev, (void *)indio_dev->channels);
 	iio_device_unregister(indio_dev);
 	iio_device_free(indio_dev);
-
-	return 0;
 }
 
 #ifdef CONFIG_OF

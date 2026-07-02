@@ -25,8 +25,9 @@
 struct mca_tpm_mod {
 	struct mca_pwm_drv	*parent;
 	struct device_node	*np;
-	struct pwm_chip		chip;
+	struct pwm_chip		*chip;
 	u32			tpm_idx;
+	u32			num_ch;
 	u8			cfg[MCA_TPM_PWM_NR_CH];
 	u8			duty[MCA_TPM_PWM_NR_CH];
 	u32			period;
@@ -41,7 +42,7 @@ struct mca_pwm_drv {
 	struct mca_tpm_mod	*tpms;
 };
 
-#define to_mca_tpm_mod(_chip)	container_of(_chip, struct mca_tpm_mod, chip)
+#define to_mca_tpm_mod(_chip)	pwmchip_get_drvdata(_chip)
 
 #define TPM_CH_CFG_REG(t,c)	(MCA_REG_TPM0_CH0_CFG + MCA_PWM_CH_LEN * (c) + MCA_PWM_TPM_LEN * (t))
 #define TPM_CH_DUTY_REG(t,c)	(MCA_REG_TPM0_CH0_DUTY + MCA_PWM_CH_LEN * (c) + MCA_PWM_TPM_LEN * (t))
@@ -67,7 +68,7 @@ static int mca_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	u8 buf[2];
 
 	if (period_ns != pwm_get_period(pwm)) {
-		dev_err(chip->dev, "cannot change PWM period while enabled\n");
+		dev_err(pwmchip_parent(chip), "cannot change PWM period while enabled\n");
 		return -EBUSY;
 	}
 
@@ -79,7 +80,7 @@ static int mca_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 		prescaler_idx++;
 		tpm_mod_val >>= 1;
 		if (prescaler_idx == ARRAY_SIZE(prescaler)) {
-			dev_err(chip->dev,
+			dev_err(pwmchip_parent(chip),
 				"prescaler required exceeds max value\n");
 			return -EINVAL;
 		}
@@ -92,7 +93,7 @@ static int mca_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	duty_percent = duty_ns * 100;
 	do_div(duty_percent, period_ns);
 
-	dev_dbg(chip->dev,
+	dev_dbg(pwmchip_parent(chip),
 		"duty_ns = %d, period_ns = %d, freq = %llu, duty = %llu,"
 		"prescaler = %d/%d\n",
 		duty_ns, period_ns, freq_hz, duty_percent, prescaler_idx,
@@ -102,11 +103,11 @@ static int mca_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	ret = regmap_write(map, TPM_CFG_PRESCALER(mca_tpm->tpm_idx),
 			   prescaler_idx);
 	if (ret) {
-		dev_err(chip->dev, "failed writting prescaler register\n");
+		dev_err(pwmchip_parent(chip), "failed writting prescaler register\n");
 		return ret;
 	}
 
-	dev_dbg(chip->dev, "[%04x] <- %x\n",
+	dev_dbg(pwmchip_parent(chip), "[%04x] <- %x\n",
 		TPM_CFG_PRESCALER(mca_tpm->tpm_idx), prescaler_idx);
 
 	/*
@@ -118,11 +119,11 @@ static int mca_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	ret = regmap_bulk_write(map, TPM_CFG_FREQ(mca_tpm->tpm_idx),
 				(u8 *)&freq_hz, sizeof(u32));
 	if (ret) {
-		dev_err(chip->dev, "failed writting frequency register\n");
+		dev_err(pwmchip_parent(chip), "failed writting frequency register\n");
 		return ret;
 	}
 
-	dev_dbg(chip->dev, "[%04x] <- %x\n", TPM_CFG_FREQ(mca_tpm->tpm_idx),
+	dev_dbg(pwmchip_parent(chip), "[%04x] <- %x\n", TPM_CFG_FREQ(mca_tpm->tpm_idx),
 		(u32)freq_hz);
 
 	buf[0] = mca_tpm->cfg[pwm->hwpwm];
@@ -133,7 +134,7 @@ static int mca_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (!ret) {
 		mca_tpm->duty[pwm->hwpwm] = buf[1];
 
-		dev_dbg(chip->dev, "[%04x] <- %02x.%02x\n",
+		dev_dbg(pwmchip_parent(chip), "[%04x] <- %02x.%02x\n",
 			TPM_CH_CFG_REG(mca_tpm->tpm_idx, pwm->hwpwm),
 			buf[0], buf[1]);
 	}
@@ -156,7 +157,7 @@ static int mca_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 	if (!ret) {
 		mca_tpm->cfg[pwm->hwpwm] = buf[0];
 
-		dev_dbg(chip->dev, "[%04x] <- %02x.%02x\n",
+		dev_dbg(pwmchip_parent(chip), "[%04x] <- %02x.%02x\n",
 			TPM_CH_CFG_REG(mca_tpm->tpm_idx, pwm->hwpwm),
 			buf[0], buf[1]);
 	}
@@ -178,7 +179,7 @@ static void mca_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm)
 	if (!ret) {
 		mca_tpm->cfg[pwm->hwpwm] = buf[0];
 
-		dev_dbg(chip->dev, "[%04x] <- %02x.%02x\n",
+		dev_dbg(pwmchip_parent(chip), "[%04x] <- %02x.%02x\n",
 			TPM_CH_CFG_REG(mca_tpm->tpm_idx, pwm->hwpwm),
 			buf[0], buf[1]);
 	}
@@ -204,7 +205,7 @@ static int mca_pwm_set_polarity(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (!ret) {
 		mca_tpm->cfg[pwm->hwpwm] = buf[0];
 
-		dev_dbg(chip->dev, "[%04x] <- %02x.%02x\n",
+		dev_dbg(pwmchip_parent(chip), "[%04x] <- %02x.%02x\n",
 			TPM_CH_CFG_REG(mca_tpm->tpm_idx, pwm->hwpwm),
 			buf[0], buf[1]);
 	}
@@ -257,13 +258,13 @@ static int mca_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 
 static struct pwm_ops mca_pwm_ops = {
 	.apply	= mca_pwm_apply,
-	.owner	= THIS_MODULE,
 };
 
 static const struct of_device_id mca_pwm_dt_ids[] = {
 	{
 		.compatible = "digi,mca-pwm",
 	},
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mca_pwm_dt_ids);
 
@@ -313,7 +314,7 @@ static int mca_pwm_get_tpm_config_of(struct mca_pwm_drv *pwm_drv)
 		}
 
 		tpm->tpm_idx = tpm_idx;
-		tpm->chip.npwm = num_ch;
+		tpm->num_ch = num_ch;
 		tpm->np = node;
 
 		/* Init channels: disabled, active high polarity */
@@ -347,52 +348,35 @@ static int mca_pwm_probe(struct platform_device *pdev)
 	ret = mca_pwm_get_tpm_config_of(pwm_drv);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "failed to get DT driver configuration (%d)\n", ret);
-		goto err_free;
+		return ret;
 	}
 
 	for (i = 0; i < pwm_drv->num_tpms; i++) {
 		struct mca_tpm_mod *tpm = &pwm_drv->tpms[i];
+		struct pwm_chip *chip;
 
-		tpm->parent = pwm_drv;
-		tpm->chip.dev = &pdev->dev;
-		tpm->chip.ops = &mca_pwm_ops;
-		tpm->chip.of_pwm_n_cells = 3;
-		tpm->chip.base = -1;
-		tpm->chip.of_xlate = mca_pwm_of_xlate;
-
-		ret = devm_pwmchip_add(&pdev->dev, &tpm->chip);
-		if (ret < 0) {
-			dev_err(&pdev->dev, "pwmchip_add() failed: %d\n", ret);
-			goto err_free;
+		chip = devm_pwmchip_alloc(&pdev->dev, tpm->num_ch, 0);
+		if (IS_ERR(chip)) {
+			ret = PTR_ERR(chip);
+			dev_err(&pdev->dev, "pwmchip_alloc() failed: %d\n", ret);
+			return ret;
 		}
+
+		tpm->chip = chip;
+		tpm->parent = pwm_drv;
+		chip->ops = &mca_pwm_ops;
+		chip->of_xlate = mca_pwm_of_xlate;
+		pwmchip_set_drvdata(chip, tpm);
+
+		ret = devm_pwmchip_add(&pdev->dev, chip);
+		if (ret < 0)
+			return dev_err_probe(&pdev->dev, ret,
+					     "failed to add PWM chip\n");
 
 		dev_info(&pdev->dev,
 			 "registered PWM chip (tpm: %d, channels: %d)\n",
-			 tpm->tpm_idx, tpm->chip.npwm);
+			 tpm->tpm_idx, chip->npwm);
 	}
-
-	return 0;
-
-err_free:
-	kfree(pwm_drv->tpms);
-	kfree(pwm_drv);
-
-	return ret;
-}
-
-static int mca_pwm_remove(struct platform_device *pdev)
-{
-	struct mca_pwm_drv *pwm_drv = platform_get_drvdata(pdev);
-	int i;
-
-	for (i = 0; i < pwm_drv->num_tpms; i++) {
-		struct mca_tpm_mod *tpm = &pwm_drv->tpms[i];
-
-		pwmchip_remove(&tpm->chip);
-	}
-
-	kfree(pwm_drv->tpms);
-	kfree(pwm_drv);
 
 	return 0;
 }
@@ -420,7 +404,6 @@ static struct platform_driver mca_pwm_driver = {
 #endif
 	},
 	.probe = mca_pwm_probe,
-	.remove = mca_pwm_remove,
 };
 
 module_platform_driver(mca_pwm_driver);

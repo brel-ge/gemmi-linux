@@ -25,7 +25,7 @@
 #include <linux/mfd/mca-common/core.h>
 #include <linux/mfd/mca-ioexp/core.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 static struct resource mca_ioexp_gpios_resources[] = {
 	{

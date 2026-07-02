@@ -20,7 +20,9 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 
 #define DRVNAME		"btdigi"
@@ -48,7 +50,7 @@ static int bt_module_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int bt_module_remove(struct platform_device *pdev)
+static void bt_module_remove(struct platform_device *pdev)
 {
 	int ret;
 
@@ -56,11 +58,9 @@ static int bt_module_remove(struct platform_device *pdev)
 		ret = regulator_disable(vin_regulator);
 		if (ret) {
 			dev_err(&pdev->dev, "disable vin regulator failed\n");
-			return ret;
+			return;
 		}
 	}
-
-	return 0;
 }
 
 #ifdef CONFIG_OF

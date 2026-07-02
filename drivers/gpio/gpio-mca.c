@@ -124,12 +124,12 @@ static int mca_gpio_get(struct gpio_chip *gc, unsigned num)
 	return (val & (1 << BIT_OFFSET(num)) ? 1 : 0);
 }
 
-static void mca_gpio_set(struct gpio_chip *gc, unsigned num, int val)
+static int mca_gpio_set(struct gpio_chip *gc, unsigned num, int val)
 {
 	struct mca_gpio *gpio = to_mca_gpio(gc);
 	unsigned int reg = val ? GPIO_SET_REG(num) : GPIO_CLEAR_REG(num);
 
-	regmap_write(gpio->regmap, reg, 1 << BIT_OFFSET(num));
+	return regmap_write(gpio->regmap, reg, 1 << BIT_OFFSET(num));
 }
 
 static int mca_gpio_direction_input(struct gpio_chip *gc, unsigned num)
@@ -147,7 +147,9 @@ static int mca_gpio_direction_output(struct gpio_chip *gc, unsigned num,
 	int ret;
 
 	/* Set value before setting direction */
-	mca_gpio_set(gc, num, val);
+	ret = mca_gpio_set(gc, num, val);
+	if (ret < 0)
+		return ret;
 
 	ret = regmap_update_bits(gpio->regmap, GPIO_DIR_REG(num),
 				 1 << BIT_OFFSET(num), 1 << BIT_OFFSET(num));
@@ -482,8 +484,6 @@ static int mca_gpio_probe(struct platform_device *pdev)
 	struct mca_gpio *gpio;
 
 	struct device_node *np;
-	struct property *prop;
-	const __be32 *p;
 	unsigned int val;
 	int ret, i, ngpio, nbank;
 
@@ -548,7 +548,7 @@ static int mca_gpio_probe(struct platform_device *pdev)
 					"pwroff-wakeup-capable-ios");
 		if (ret > 0) {
 			of_property_for_each_u32(np, "pwroff-wakeup-capable-ios",
-							prop, p, val) {
+						 val) {
 				if (val < MCA_MAX_IOS)
 					mca_gpio_pwroff_wakeup_enable(gpio, val, 1);
 			}
@@ -579,15 +579,13 @@ err:
 	return ret;
 }
 
-static int mca_gpio_remove(struct platform_device *pdev)
+static void mca_gpio_remove(struct platform_device *pdev)
 {
 	struct mca_gpio *gpio = platform_get_drvdata(pdev);
 	struct mca_drv *mca = (struct mca_drv *)gpio->parent; /* TODO */
 
 	mca->gpio_base = -1;
 	gpiochip_remove(&gpio->gc);
-
-	return 0;
 }
 
 #ifdef CONFIG_OF

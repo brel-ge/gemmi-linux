@@ -292,7 +292,7 @@ err_free_drv:
 	return ret;
 }
 
-static int mca_led_remove(struct platform_device *pdev)
+static void mca_led_remove(struct platform_device *pdev)
 {
 	struct mca_led_drv *led_drv = platform_get_drvdata(pdev);
 	int i;
@@ -305,8 +305,6 @@ static int mca_led_remove(struct platform_device *pdev)
 
 	devm_kfree(&pdev->dev, led_drv->leds);
 	devm_kfree(&pdev->dev, led_drv);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

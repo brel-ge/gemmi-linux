@@ -18,9 +18,13 @@
  */
 
 #include <linux/device.h>
+#include <linux/gpio.h>
+#include <linux/kfifo.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/serial_core.h>
 #include <linux/tty_flip.h>
@@ -430,7 +434,7 @@ static void mca_uart_handle_tx(struct uart_port *port)
 {
 	struct mca_uart *mca_uart = to_mca_uart(port, port);
 	struct regmap *regmap = mca_uart->mca->regmap;
-	struct circ_buf *xmit = &port->state->xmit;
+	struct tty_port *tport = &port->state->port;
 	unsigned int to_send;
 	uint8_t tx_buf[MCA_UART_TX_FIFO_SIZE];
 
@@ -439,15 +443,14 @@ static void mca_uart_handle_tx(struct uart_port *port)
 	 * has been shut down and port->state->port.tty is NULL. If not checked,
 	 * uart_tx_stopped() would crash.
 	 */
-	if (!port->state->port.tty || uart_circ_empty(xmit) ||
+	if (!port->state->port.tty || kfifo_is_empty(&tport->xmit_fifo) ||
 	    uart_tx_stopped(port))
 		return;
 
 	/* Get length of data pending in circular buffer */
-	to_send = uart_circ_chars_pending(xmit);
+	to_send = kfifo_len(&tport->xmit_fifo);
 	if (likely(to_send)) {
 		unsigned int txlen;
-		unsigned int i;
 		int ret;
 
 		/* Limit to size of TX FIFO */
@@ -484,12 +487,7 @@ static void mca_uart_handle_tx(struct uart_port *port)
 		if (to_send > MCA_UART_MAX_TX_FRAME_LEN)
 			to_send = MCA_UART_MAX_TX_FRAME_LEN;
 
-		port->icount.tx += to_send;
-		/* Convert to linear buffer */
-		for (i = 0; i < to_send; ++i) {
-			tx_buf[i] = xmit->buf[xmit->tail];
-			xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		}
+		to_send = uart_fifo_out(port, tx_buf, to_send);
 
 		ret = regmap_bulk_write(regmap,
 					mca_uart->baddr + MCA_REG_UART_THR,
@@ -499,7 +497,7 @@ static void mca_uart_handle_tx(struct uart_port *port)
 				"Failed to write MCA_REG_UART_THR\n");
 	}
 
-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
 		uart_write_wakeup(port);
 }
 
@@ -905,7 +903,8 @@ static int mca_uart_allocate_port_resources(struct mca_uart_drv *uart_drv,
 		int mca_io = mca_uart->pins[i];
 		int gpio = mca_uart->mca->gpio_base + mca_io;
 
-		ret = devm_gpio_request(uart_drv->dev, gpio, MCA_BASE_DRVNAME_UART);
+		ret = devm_gpio_request_one(uart_drv->dev, gpio, GPIOF_IN,
+					    MCA_BASE_DRVNAME_UART);
 		if (ret) {
 			dev_err(uart_drv->dev,
 				"Failed to allocate MCA IO%d (gpio %d) (%d)\n",
@@ -962,6 +961,7 @@ static int mca_uart_probe(struct platform_device *pdev)
 	u32 num_uarts;
 	int ret, i, pin;
 	char msg[256];
+	size_t len;
 
 	if (IS_ERR(mca))
 		return PTR_ERR(mca);
@@ -1096,12 +1096,13 @@ static int mca_uart_probe(struct platform_device *pdev)
 		}
 
 		/* Report registered UART data to user */
-		sprintf(msg, "%s%d@0x%x IRQ=%d, IOs:",
-			uart_drv->uart.dev_name, i, mca_uart->baddr,
-			mca_uart->port.irq);
+		len = scnprintf(msg, sizeof(msg), "%s%d@0x%x IRQ=%d, IOs:",
+				uart_drv->uart.dev_name, i, mca_uart->baddr,
+				mca_uart->port.irq);
 		for (pin = 0; pin < mca_uart->npins; pin++)
-			sprintf(msg, "%s %s=%d,", msg, iopins_names[pin],
-				mca_uart->pins[pin]);
+			len += scnprintf(msg + len, sizeof(msg) - len,
+					 " %s=%d,", iopins_names[pin],
+					 mca_uart->pins[pin]);
 		dev_info(&pdev->dev, "%s\n", msg);
 	}
 
@@ -1123,9 +1124,9 @@ err_free1:
 	return ret;
 }
 
-static int mca_uart_remove(struct platform_device *pdev)
+static void mca_uart_remove(struct platform_device *pdev)
 {
-	struct mca_uart_drv *uart_drv = dev_get_drvdata(pdev->dev.parent);
+	struct mca_uart_drv *uart_drv = platform_get_drvdata(pdev);
 	int i;
 
 	for (i = 0; i < uart_drv->num_uarts; i++) {
@@ -1135,8 +1136,6 @@ static int mca_uart_remove(struct platform_device *pdev)
 	uart_unregister_driver(&uart_drv->uart);
 	devm_kfree(&pdev->dev, uart_drv->ports);
 	devm_kfree(&pdev->dev, uart_drv);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -1151,9 +1150,9 @@ struct uart_match {
 	struct uart_driver *driver;
 };
 
-static int serial_match_port(struct device *dev, void *data)
+static int serial_match_port(struct device *dev, const void *data)
 {
-	struct uart_match *match = data;
+	const struct uart_match *match = data;
 	struct tty_driver *tty_drv = match->driver->tty_driver;
 	dev_t devt = MKDEV(tty_drv->major, tty_drv->minor_start) +
 		     match->port->line;
