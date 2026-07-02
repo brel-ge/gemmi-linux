@@ -21,15 +21,17 @@ hsio_per_clk: clock-hsio-per {
 };
 
 hsio_refa_clk: clock-hsio-refa {
-	compatible = "fixed-clock";
+	compatible = "gpio-gate-clock";
 	clocks = <&xtal100m>;
 	#clock-cells = <0>;
+	enable-gpios = <&lsio_gpio4 27 GPIO_ACTIVE_LOW>;
 };
 
 hsio_refb_clk: clock-hsio-refb {
-	compatible = "fixed-clock";
+	compatible = "gpio-gate-clock";
 	clocks = <&xtal100m>;
 	#clock-cells = <0>;
+	enable-gpios = <&lsio_gpio4 1 GPIO_ACTIVE_LOW>;
 };
 
 xtal100m: clock-xtal100m {

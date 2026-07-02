@@ -518,6 +518,16 @@
 	status = "disabled";
 };
 
+&hsio_refa_clk {
+	compatible = "fixed-clock";
+	/delete-property/ enable-gpios;
+};
+
+&hsio_refb_clk {
+	compatible = "fixed-clock";
+	/delete-property/ enable-gpios;
+};
+
 &tsens {
 	tsens-num = <2>;
 };
