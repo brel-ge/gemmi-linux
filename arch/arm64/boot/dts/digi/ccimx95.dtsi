@@ -5,6 +5,10 @@
 
 #include <dt-bindings/regulator/nxp,pf09-regulator.h>
 
+&ele_if0 {
+	memory-region = <&ele_reserved>;
+};
+
 / {
 	cm7: imx95-cm7 {
 		compatible = "fsl,imx95-cm7";
@@ -16,6 +20,11 @@
 				<&vdev1vring0>, <&vdev1vring1>, <&rsc_table>;
 		fsl,startup-delay-ms = <50>;
 		status = "okay";
+	};
+
+	mali_pma: protected-memory-allocator {
+		compatible = "arm,protected-memory-allocator";
+		memory-region = <&mali_protected>;
 	};
 
 	firmware {
@@ -75,6 +84,11 @@
 			no-map;
 		};
 
+		mali_protected: mali-protected@a0100000 {
+			reg = <0 0xa0100000 0 0x1000000>;
+			no-map;
+		};
+
 		vdev0vring0: vdev0vring0@88000000 {
 			reg = <0 0x88000000 0 0x8000>;
 			no-map;
@@ -103,6 +117,12 @@
 		vdevbuffer: vdevbuffer@88020000 {
 			compatible = "shared-dma-pool";
 			reg = <0 0x88020000 0 0x100000>;
+			no-map;
+		};
+
+		ele_reserved: ele-reserved@a4120000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0xa4120000 0 0x100000>;
 			no-map;
 		};
 	};
@@ -147,6 +167,10 @@
 			regulator-name = "vdd-1v8-dummy";
 		};
 	};
+};
+
+&mali {
+	protected-memory-allocator = <&mali_pma>;
 };
 
 &adc1 {
