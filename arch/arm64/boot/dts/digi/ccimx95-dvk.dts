@@ -336,6 +336,14 @@
 	};
 };
 
+&netcmix_blk_ctrl {
+	status = "okay";
+};
+
+&netc_blk_ctrl {
+	status = "okay";
+};
+
 /* Shared Ethernet MDIO */
 &netc_emdio {
 	status = "okay";
