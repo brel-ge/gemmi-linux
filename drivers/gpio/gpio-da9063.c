@@ -3,13 +3,15 @@
  * GPIO Driver for Dialog DA9063 PMICs.
  *
  * Copyright(c) 2012 Dialog Semiconductor Ltd.
- * Copyright (C) 2025, Digi International Inc.
+ * Copyright (C) 2025,2026, Digi International Inc.
  *
  * Author: David Dajun Chen <dchen@diasemi.com>
  */
 #include <linux/module.h>
 #include <linux/of_device.h>
+#include <linux/platform_device.h>
 #include <linux/gpio/driver.h>
+#include <linux/slab.h>
 
 #include <linux/mfd/da9063/core.h>
 #include <linux/mfd/da9063/registers.h>
@@ -75,16 +77,16 @@ static int da9063_gpio_get(struct gpio_chip *gc, unsigned offset)
 	return val & (1 << DA9063_GPIO_SHIFT(offset));
 }
 
-static void da9063_gpio_set(struct gpio_chip *gc, unsigned offset, int value)
+static int da9063_gpio_set(struct gpio_chip *gc, unsigned offset, int value)
 {
 	struct da9063_gpio *gpio = gpiochip_get_data(gc);
 	unsigned int reg = (offset >= 8) ?
 			    DA9063_REG_GPIO_MODE8_15 :
 			    DA9063_REG_GPIO_MODE0_7;
 
-	regmap_update_bits(gpio->da9063->regmap, reg,
-			   1 << DA9063_GPIO_SHIFT(offset),
-			   value << DA9063_GPIO_SHIFT(offset));
+	return regmap_update_bits(gpio->da9063->regmap, reg,
+				  1 << DA9063_GPIO_SHIFT(offset),
+				  value << DA9063_GPIO_SHIFT(offset));
 }
 
 static int da9063_gpio_direction_input(struct gpio_chip *gc, unsigned offset)
@@ -120,9 +122,7 @@ static int da9063_gpio_direction_output(struct gpio_chip *gc,
 	if (ret < 0)
 		return ret;
 
-	da9063_gpio_set(gc, offset, value);
-
-	return 0;
+	return da9063_gpio_set(gc, offset, value);
 }
 
 static int da9063_gpio_to_irq(struct gpio_chip *gc, u32 offset)
@@ -163,7 +163,7 @@ static int da9063_gpio_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	gpio->da9063 = dev_get_drvdata(pdev->dev.parent);
-	if(gpio->da9063  == NULL)
+	if (gpio->da9063 == NULL)
 		return -EPROBE_DEFER;
 
 	gpio->gp = reference_gp;
