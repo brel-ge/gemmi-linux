@@ -1326,19 +1326,33 @@ static int imx_pcie_host_init(struct dw_pcie_rp *pp)
 		pp->bridge->disable_device = imx_pcie_disable_device;
 	}
 
-	ret = imx_pcie_clk_enable(imx_pcie);
-	if (ret) {
-		dev_err(dev, "unable to enable pcie clocks: %d\n", ret);
-		return ret;
-	}
+	/*
+	 * HSIOMIX registers on i.MX95 require their clocks before the pre-reset
+	 * configuration.  Legacy controllers, including i.MX6Q, require the
+	 * reset/PHY setup to happen before their PCIe clocks are enabled.
+	 */
+	if (imx_pcie->drvdata->init_pre_reset) {
+		ret = imx_pcie_clk_enable(imx_pcie);
+		if (ret) {
+			dev_err(dev, "unable to enable pcie clocks: %d\n", ret);
+			return ret;
+		}
 
-	if (imx_pcie->drvdata->init_pre_reset)
 		imx_pcie->drvdata->init_pre_reset(imx_pcie);
+		imx_pcie_assert_core_reset(imx_pcie);
+		if (imx_pcie->drvdata->init_phy)
+			imx_pcie->drvdata->init_phy(imx_pcie);
+	} else {
+		imx_pcie_assert_core_reset(imx_pcie);
+		if (imx_pcie->drvdata->init_phy)
+			imx_pcie->drvdata->init_phy(imx_pcie);
 
-	imx_pcie_assert_core_reset(imx_pcie);
-
-	if (imx_pcie->drvdata->init_phy)
-		imx_pcie->drvdata->init_phy(imx_pcie);
+		ret = imx_pcie_clk_enable(imx_pcie);
+		if (ret) {
+			dev_err(dev, "unable to enable pcie clocks: %d\n", ret);
+			return ret;
+		}
+	}
 
 	imx_pcie_configure_type(imx_pcie);
 
