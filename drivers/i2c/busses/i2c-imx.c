@@ -718,8 +718,21 @@ static int i2c_imx_set_clk(struct imx_i2c_struct *i2c_imx,
 			   unsigned int i2c_clk_rate)
 {
 	struct imx_i2c_clk_pair *i2c_clk_div = i2c_imx->hwdata->clk_div;
+	struct imxi2c_platform_data *pdata =
+		dev_get_platdata(&i2c_imx->adapter.dev);
 	unsigned int div;
 	int i;
+
+	/*
+	 * MCA firmware older than 1.19 requests standard-mode operation by
+	 * updating this platform data after the adapter has been probed.
+	 */
+	if (pdata && pdata->bitrate && pdata->bitrate != i2c_imx->bitrate) {
+		dev_warn(&i2c_imx->adapter.dev,
+			 "<%s> Changing bitrate to %d\n", __func__, pdata->bitrate);
+		i2c_imx->bitrate = pdata->bitrate;
+		i2c_imx->cur_clk = 0;
+	}
 
 	if (i2c_imx->hwdata->has_err007805 && i2c_imx->bitrate > 384000) {
 		dev_dbg(&i2c_imx->adapter.dev,
@@ -788,6 +801,10 @@ static int i2c_imx_start(struct imx_i2c_struct *i2c_imx, bool atomic)
 {
 	unsigned int temp = 0;
 	int result;
+
+	result = i2c_imx_set_clk(i2c_imx, clk_get_rate(i2c_imx->clk));
+	if (result)
+		return result;
 
 	imx_i2c_write_reg(i2c_imx->ifdr, i2c_imx, IMX_I2C_IFDR);
 	/* Enable I2C controller */
