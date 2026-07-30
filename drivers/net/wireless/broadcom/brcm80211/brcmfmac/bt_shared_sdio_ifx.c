@@ -43,6 +43,7 @@
 #include "soc.h"
 #include "fwil.h"
 #include "common.h"
+#include "bt_shared_sdio_ifx.h"
 
 /* make sure BTS version is the same as bt drier */
 #define BTS_VER_MAJOR 2
@@ -719,7 +720,7 @@ int inf_bus_recv_buf(struct brcmf_bus *bus_if, u8 *buf, u32 nbytes)
 	sdiodev = bus_if->bus_priv.sdio;
 
 	sdio_claim_host(sdiodev->func1);
-	err = brcmf_sdiod_recv_buf_fn(sdiodev, SDIO_FUNC_3, buf, nbytes);
+	err = brcmf_sdiod_recv_buf(sdiodev, SDIO_FUNC_3, buf, nbytes);
 	sdio_release_host(sdiodev->func1);
 
 	brcmf_dbg(DATA, "F3 receive nbytes: %d, err: %d\n", nbytes, err);
@@ -746,7 +747,7 @@ int inf_bus_send_buf(struct brcmf_bus *bus_if, u8 *buf, u32 nbytes)
 	sdiodev = bus_if->bus_priv.sdio;
 
 	sdio_claim_host(sdiodev->func1);
-	err = brcmf_sdiod_send_buf_fn(sdiodev, SDIO_FUNC_3, buf, nbytes);
+	err = brcmf_sdiod_send_buf(sdiodev, SDIO_FUNC_3, buf, nbytes);
 	sdio_release_host(sdiodev->func1);
 
 	brcmf_dbg(DATA, "F3 send nbytes: %d, err: %d\n", nbytes, err);

@@ -2,10 +2,13 @@
 /*
  * Copyright (c) 2022 Broadcom Corporation
  */
+#include <linux/delay.h>
 #include <linux/errno.h>
+#include <linux/string.h>
 #include <linux/types.h>
 #include <core.h>
 #include <bus.h>
+#include <cfg80211.h>
 #include <fwvid.h>
 #include <fwil.h>
 #include <fweh.h>
@@ -18,7 +21,7 @@
 #define BRCMF_CYW_E_EXT_AUTH_FRAME_RX	188
 #define BRCMF_CYW_E_MGMT_FRAME_TXS	189
 #define BRCMF_CYW_E_MGMT_FRAME_TXS_OC	190
-#define BRCMF_CYW_E_LAST		197
+#define BRCMF_CYW_E_LAST		203
 
 #define MGMT_AUTH_FRAME_DWELL_TIME	4000
 #define MGMT_AUTH_FRAME_WAIT_TIME	(MGMT_AUTH_FRAME_DWELL_TIME + 100)
@@ -115,6 +118,7 @@ int brcmf_cyw_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 	__le16 hw_ch;
 	struct brcmf_mf_params_le *mf_params;
 	u32 mf_params_len;
+	u32 packet_id;
 	s32 ready;
 
 	brcmf_dbg(TRACE, "Enter\n");
@@ -156,9 +160,14 @@ int brcmf_cyw_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 
 	memcpy(&mf_params->da[0], &mgmt->da[0], ETH_ALEN);
 	memcpy(&mf_params->bssid[0], &mgmt->bssid[0], ETH_ALEN);
-	mf_params->packet_id = cpu_to_le32(*cookie);
-	memcpy(mf_params->data, &buf[DOT11_MGMT_HDR_LEN],
-	       le16_to_cpu(mf_params->len));
+	packet_id = lower_32_bits((unsigned long)mf_params->data);
+	if (!packet_id)
+		packet_id = 1;
+	*cookie = packet_id;
+	mf_params->packet_id = cpu_to_le32(packet_id);
+	unsafe_memcpy(mf_params->data, &buf[DOT11_MGMT_HDR_LEN],
+		      le16_to_cpu(mf_params->len),
+		      /* Allocation includes the variable-length data. */);
 
 	brcmf_dbg(TRACE, "Auth frame, cookie=%d, fc=%04x, len=%d, channel=%d\n",
 		  le32_to_cpu(mf_params->packet_id),
@@ -201,6 +210,7 @@ brcmf_cyw_external_auth(struct wiphy *wiphy, struct net_device *dev,
 {
 	struct brcmf_if *ifp;
 	struct brcmf_pub *drvr;
+	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
 	struct brcmf_auth_req_status_le auth_status;
 	int ret = 0;
 
@@ -221,11 +231,23 @@ brcmf_cyw_external_auth(struct wiphy *wiphy, struct net_device *dev,
 				      IEEE80211_MAX_SSID_LEN);
 	auth_status.ssid_len = cpu_to_le32(params->ssid.ssid_len);
 	memcpy(auth_status.ssid, params->ssid.ssid, params->ssid.ssid_len);
+	memset(auth_status.pmkid, 0, WLAN_PMKID_LEN);
+	if (params->pmkid)
+		memcpy(auth_status.pmkid, params->pmkid, WLAN_PMKID_LEN);
 
 	ret = brcmf_fil_iovar_data_set(ifp, "auth_status", &auth_status,
 				       sizeof(auth_status));
 	if (ret < 0)
 		bphy_err(drvr, "auth_status iovar failed: ret=%d\n", ret);
+
+	if (params->pmkid) {
+		ret = brcmf_update_pmksa(cfg, ifp, params->bssid,
+					 params->pmkid, PMKSA_SET);
+		if (ret < 0)
+			bphy_err(drvr,
+				 "PMKSA_SET brcmf_update_pmksa failed: ret=%d\n",
+				 ret);
+	}
 
 	return ret;
 }
@@ -241,27 +263,81 @@ brcmf_cyw_notify_ext_auth_req(struct brcmf_if *ifp,
 			      const struct brcmf_event_msg *e, void *data)
 {
 	struct brcmf_pub *drvr = ifp->drvr;
+	struct brcmf_cfg80211_info *cfg = drvr->config;
 	struct cfg80211_external_auth_params params;
 	struct brcmf_auth_req_status_le *auth_req =
 		(struct brcmf_auth_req_status_le *)data;
+	struct brcmf_auth_req_status_info_le_v2 *auth_req_v2;
+	struct brcmf_bss_info_le *bi;
+	u32 bss_len;
 	s32 err = 0;
 
 	brcmf_dbg(INFO, "Enter: event %s (%d) received\n",
 		  brcmf_fweh_event_name(e->event_code), e->event_code);
 
-	if (e->datalen < sizeof(*auth_req)) {
-		bphy_err(drvr, "Event %s (%d) data too small. Ignore\n",
-			 brcmf_fweh_event_name(e->event_code), e->event_code);
-		return -EINVAL;
-	}
-
 	memset(&params, 0, sizeof(params));
 	params.action = NL80211_EXTERNAL_AUTH_START;
 	params.key_mgmt_suite = WLAN_AKM_SUITE_SAE;
 	params.status = WLAN_STATUS_SUCCESS;
-	params.ssid.ssid_len = min_t(u32, 32, le32_to_cpu(auth_req->ssid_len));
-	memcpy(params.ssid.ssid, auth_req->ssid, params.ssid.ssid_len);
-	memcpy(params.bssid, auth_req->peer_mac, ETH_ALEN);
+
+	if (drvr->wlc_ver.wlc_ver_major > BRCMF_AUTH_STATUS_V2_FW_MAJOR ||
+	    (drvr->wlc_ver.wlc_ver_major == BRCMF_AUTH_STATUS_V2_FW_MAJOR &&
+	     drvr->wlc_ver.wlc_ver_minor >= BRCMF_AUTH_STATUS_V2_FW_MINOR)) {
+		auth_req_v2 = data;
+		if (e->datalen < sizeof(*auth_req_v2)) {
+			bphy_err(drvr, "External auth v2 event data too small\n");
+			return -EINVAL;
+		}
+
+		if (e->datalen > sizeof(*auth_req_v2)) {
+			if (e->datalen < sizeof(*auth_req_v2) + sizeof(*bi)) {
+				bphy_err(drvr,
+					 "External auth v2 BSS data too small\n");
+				return -EINVAL;
+			}
+
+			bi = auth_req_v2->bss_info_le;
+			bss_len = le32_to_cpu(bi->length);
+			if (bss_len < sizeof(*bi) ||
+			    bss_len > e->datalen - sizeof(*auth_req_v2)) {
+				bphy_err(drvr,
+					 "External auth v2 invalid BSS length %u\n",
+					 bss_len);
+				return -EINVAL;
+			}
+
+			err = brcmf_inform_single_bss(cfg, bi);
+			if (err) {
+				bphy_err(drvr,
+					 "Failed to update BSS info: err=%d\n",
+					 err);
+				return err;
+			}
+		}
+
+		/* Allow cfg80211 to publish the roaming target scan result. */
+		msleep(10);
+		params.ssid.ssid_len =
+			min_t(u32, IEEE80211_MAX_SSID_LEN,
+			      le32_to_cpu(auth_req_v2->ssid_len));
+		memcpy(params.ssid.ssid, auth_req_v2->ssid,
+		       params.ssid.ssid_len);
+		memcpy(params.bssid, auth_req_v2->peer_mac, ETH_ALEN);
+	} else {
+		if (e->datalen < sizeof(*auth_req)) {
+			bphy_err(drvr, "Event %s (%d) data too small. Ignore\n",
+				 brcmf_fweh_event_name(e->event_code),
+				 e->event_code);
+			return -EINVAL;
+		}
+
+		params.ssid.ssid_len =
+			min_t(u32, IEEE80211_MAX_SSID_LEN,
+			      le32_to_cpu(auth_req->ssid_len));
+		memcpy(params.ssid.ssid, auth_req->ssid,
+		       params.ssid.ssid_len);
+		memcpy(params.bssid, auth_req->peer_mac, ETH_ALEN);
+	}
 
 	err = cfg80211_external_auth_request(ifp->ndev, &params, GFP_KERNEL);
 	if (err)
@@ -310,13 +386,12 @@ brcmf_notify_auth_frame_rx(struct brcmf_if *ifp,
 	brcmf_fil_cmd_data_get(ifp, BRCMF_C_GET_BSSID, mgmt_frame->bssid,
 			       ETH_ALEN);
 	frame += offsetof(struct ieee80211_mgmt, u);
-	memcpy(&mgmt_frame->u, frame,
-	       mgmt_frame_len - offsetof(struct ieee80211_mgmt, u));
+	unsafe_memcpy(&mgmt_frame->u, frame,
+		      mgmt_frame_len - offsetof(struct ieee80211_mgmt, u),
+		      /* Allocation is mgmt_frame_len bytes. */);
 
 	freq = ieee80211_channel_to_frequency(ch.control_ch_num,
-					      ch.band == BRCMU_CHAN_BAND_2G ?
-					      NL80211_BAND_2GHZ :
-					      NL80211_BAND_5GHZ);
+			BRCMU_CHAN_BAND_TO_NL80211(ch.band));
 
 	cfg80211_rx_mgmt(wdev, freq, 0, (u8 *)mgmt_frame, mgmt_frame_len,
 			 NL80211_RXMGMT_FLAG_EXTERNAL_AUTH);
