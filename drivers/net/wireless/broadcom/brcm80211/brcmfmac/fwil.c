@@ -120,7 +120,8 @@ brcmf_fil_cmd_data(struct brcmf_if *ifp, u32 cmd, void *data, u32 len, bool set)
 			brcmf_err("cmd error %d\n", err);
 
 		if (BRCMF_BUS_TUNING_L1_ON()) {
-			if (!err || resend_cnt > MAX_CMD_RESEND)
+			if (!err || err == -ERESTARTSYS ||
+			    resend_cnt > MAX_CMD_RESEND)
 				break;
 
 			brcmf_dbg(FIL, "resend cmd count %d\n", resend_cnt++);
