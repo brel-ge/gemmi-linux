@@ -266,6 +266,10 @@
 	status = "okay";
 };
 
+&wdog3 {
+	fsl,ext-reset-output;
+};
+
 /* IOMUX */
 &iomuxc {
 	/* Internal LPI2C1 (MCA, PMIC) */
