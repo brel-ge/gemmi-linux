@@ -47,6 +47,9 @@
 #define OV5640_CHIP_ID_HIGH_BYTE        0x300A
 #define OV5640_CHIP_ID_LOW_BYTE         0x300B
 
+#define OV5640_I2C_RETRIES              5
+#define OV5640_I2C_RETRY_DELAY_US       1000
+
 enum ov5640_mode {
 	ov5640_mode_MIN = 0,
 	ov5640_mode_VGA_640_480 = 0,
@@ -745,43 +748,57 @@ static void ov5640_regualtor_disable(void)
 static s32 ov5640_write_reg(u16 reg, u8 val)
 {
 	u8 au8Buf[3] = {0};
+	int ret;
+	int retry;
 
 	au8Buf[0] = reg >> 8;
 	au8Buf[1] = reg & 0xff;
 	au8Buf[2] = val;
 
-	if (i2c_master_send(ov5640_data.i2c_client, au8Buf, 3) < 0) {
-		pr_err("%s:write reg error:reg=%x,val=%x\n",
-			__func__, reg, val);
-		return -1;
+	for (retry = 0; retry < OV5640_I2C_RETRIES; retry++) {
+		ret = i2c_master_send(ov5640_data.i2c_client, au8Buf,
+				      sizeof(au8Buf));
+		if (ret == sizeof(au8Buf))
+			return 0;
+
+		usleep_range(OV5640_I2C_RETRY_DELAY_US,
+			     OV5640_I2C_RETRY_DELAY_US + 500);
 	}
 
-	return 0;
+	pr_err("%s: write reg error: reg=%x, val=%x, ret=%d\n",
+	       __func__, reg, val, ret);
+	return ret < 0 ? ret : -EIO;
 }
 
 static s32 ov5640_read_reg(u16 reg, u8 *val)
 {
 	u8 au8RegBuf[2] = {0};
 	u8 u8RdVal = 0;
+	int ret = -EIO;
+	int retry;
 
 	au8RegBuf[0] = reg >> 8;
 	au8RegBuf[1] = reg & 0xff;
 
-	if (2 != i2c_master_send(ov5640_data.i2c_client, au8RegBuf, 2)) {
-		pr_err("%s:write reg error:reg=%x\n",
-				__func__, reg);
-		return -1;
+	for (retry = 0; retry < OV5640_I2C_RETRIES; retry++) {
+		ret = i2c_master_send(ov5640_data.i2c_client, au8RegBuf,
+				      sizeof(au8RegBuf));
+		if (ret == sizeof(au8RegBuf)) {
+			ret = i2c_master_recv(ov5640_data.i2c_client,
+					      &u8RdVal, sizeof(u8RdVal));
+			if (ret == sizeof(u8RdVal)) {
+				*val = u8RdVal;
+				return u8RdVal;
+			}
+		}
+
+		usleep_range(OV5640_I2C_RETRY_DELAY_US,
+			     OV5640_I2C_RETRY_DELAY_US + 500);
 	}
 
-	if (1 != i2c_master_recv(ov5640_data.i2c_client, &u8RdVal, 1)) {
-		pr_err("%s:read reg error:reg=%x,val=%x\n",
-				__func__, reg, u8RdVal);
-		return -1;
-	}
-
-	*val = u8RdVal;
-
-	return u8RdVal;
+	pr_err("%s: read reg error: reg=%x, ret=%d\n",
+	       __func__, reg, ret);
+	return ret < 0 ? ret : -EIO;
 }
 
 #ifdef CONFIG_VIDEO_ADV_DEBUG
