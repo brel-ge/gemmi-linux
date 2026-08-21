@@ -262,6 +262,7 @@
 		     &pinctrl_lcdif_clken
 		     &pinctrl_lcdif_hvsync>;
 	lcd-supply = <&ldo4_ext>;       /* BU90T82 LVDS bridge power */
+	backlight = <&lcd_backlight>;
 	display = <&g101evn010>;
 	status = "disabled";
 
