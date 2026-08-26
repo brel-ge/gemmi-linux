@@ -163,6 +163,8 @@
 	pmic@25 {
 		compatible = "nxp,pca9451a";
 		reg = <0x25>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_pmic_irq>;
 		digi,wdog_b-disabled-in-suspend;
 		interrupt-parent = <&gpio2>;
 		interrupts = <29 IRQ_TYPE_LEVEL_LOW>;
@@ -272,6 +274,12 @@
 
 /* IOMUX */
 &iomuxc {
+	pinctrl_pmic_irq: pmicirqgrp {
+		fsl,pins = <
+			MX93_PAD_GPIO_IO29__GPIO2_IO29			0x31e
+		>;
+	};
+
 	/* Internal LPI2C1 (MCA, PMIC) */
 	pinctrl_lpi2c1: lpi2c1grp {
 		fsl,pins = <
