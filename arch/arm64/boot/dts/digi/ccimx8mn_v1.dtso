@@ -108,6 +108,8 @@
 	fragment@9 {
 		target = <&usdhc2>;
 		__overlay__ {
+			vmmc-supply = <&ldo3_reg_bd71850>;
+			vqmmc-supply = <&ldo3_reg_bd71850>;
 			/* Assert GPIO5_IO1 low for 3V3 (def) or high for 1.8V */
 			pinctrl-assert-gpios = <&gpio5 1 GPIO_ACTIVE_LOW>;
 			pinctrl-0 = <&pinctrl_usdhc2>,

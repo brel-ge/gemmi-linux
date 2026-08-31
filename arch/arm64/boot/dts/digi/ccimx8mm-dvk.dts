@@ -814,6 +814,8 @@
 	 */
 	no-1-8-v;
 	cd-gpios = <&gpio2 12 GPIO_ACTIVE_HIGH>;
+	vmmc-supply = <&ldo5_reg_pca9450>;
+	vqmmc-supply = <&ldo5_reg_pca9450>;
 	status = "okay";
 };
 
