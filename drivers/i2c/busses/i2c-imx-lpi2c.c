@@ -22,6 +22,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/platform_data/i2c-imx.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/sched.h>
@@ -312,11 +313,23 @@ static void lpi2c_imx_stop(struct lpi2c_imx_struct *lpi2c_imx, bool atomic)
  */
 static int lpi2c_imx_config(struct lpi2c_imx_struct *lpi2c_imx)
 {
+	struct imxi2c_platform_data *pdata =
+		dev_get_platdata(&lpi2c_imx->adapter.dev);
 	u32 prescale, filt, sethold = 0, datavd;
 	unsigned int clk_rate, clk_cycle, clkhi, clklo;
 	unsigned int min_prescale = 0;
 	enum lpi2c_imx_pincfg pincfg;
 	unsigned int temp;
+
+	/*
+	 * MCA firmware older than 1.19 requests standard-mode operation by
+	 * updating this platform data after the adapter has been probed.
+	 */
+	if (pdata && pdata->bitrate && pdata->bitrate != lpi2c_imx->bitrate) {
+		dev_warn(&lpi2c_imx->adapter.dev,
+			 "<%s> Changing bitrate to %d\n", __func__, pdata->bitrate);
+		lpi2c_imx->bitrate = pdata->bitrate;
+	}
 
 	lpi2c_imx_set_mode(lpi2c_imx);
 
