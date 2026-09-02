@@ -377,16 +377,16 @@ static int lpi2c_imx_config(struct lpi2c_imx_struct *lpi2c_imx)
 	if (!lpi2c_imx->hold_time_ns)
 		sethold = clkhi;
 	datavd = clkhi >> 1;
-	if (lpi2c_imx->hold_time_ns) {
-		if (clkhi < 1)
-			clkhi = 1;
-		if (clklo < 3)
-			clklo = 3;
-		if (sethold < 2)
-			sethold = 2;
-		if (datavd < clkhi)
-			datavd = clkhi;
-	}
+
+	/* Some timing parameter restrictions established by the manufacturer */
+	if (clkhi < 1)
+		clkhi = 1;
+	if (clklo < 3)
+		clklo = 3;
+	if (sethold < 2)
+		sethold = 2;
+	if (datavd < clkhi)
+		datavd = clkhi;
 	temp = datavd << 24 | sethold << 16 | clkhi << 8 | clklo;
 
 	if (lpi2c_imx->mode == HS)
