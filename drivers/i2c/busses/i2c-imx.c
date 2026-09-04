@@ -1770,6 +1770,14 @@ static int i2c_imx_xfer_common(struct i2c_adapter *adapter,
 		}
 		if (result)
 			goto fail0;
+
+		/*
+		 * Some devices require a delay between messages.
+		 * In particular, the MCA uses a register-address write followed by
+		 * a repeated-start read.
+		 */
+		if (i2c_imx->buf_time)
+			udelay(i2c_imx->buf_time);
 	}
 
 fail0:
