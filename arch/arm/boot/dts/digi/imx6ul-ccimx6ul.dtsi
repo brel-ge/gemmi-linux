@@ -83,6 +83,7 @@
 	mca_cc6ul: mca@7e {
 		compatible = "digi,mca-kl03";
 		reg = <0x7e>;
+		digi,byte-time-us = <10>;
 		interrupt-parent = <&gpio5>;
 		interrupts = <4 IRQ_TYPE_EDGE_FALLING>;
 		interrupt-controller;
