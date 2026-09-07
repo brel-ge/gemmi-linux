@@ -326,6 +326,8 @@ struct imx_i2c_struct {
 	unsigned int		cur_clk;
 	unsigned int		bitrate;
 	unsigned int		buf_time;
+	unsigned int		byte_time;
+	unsigned int		byte_time_addr;
 	enum atecc508a_wa_state	atecc508a_state;
 	unsigned long		atecc508a_timer;
 	unsigned int		atecc508a_awake_delay;
@@ -1076,6 +1078,20 @@ static int i2c_imx_unreg_slave(struct i2c_client *client)
 	return ret;
 }
 
+static inline bool
+i2c_imx_needs_interbyte_delay(struct imx_i2c_struct *i2c_imx,
+			      const struct i2c_msg *msg)
+{
+	return i2c_imx->byte_time && msg &&
+	       msg->addr == i2c_imx->byte_time_addr;
+}
+
+static inline void i2c_imx_interbyte_delay(struct imx_i2c_struct *i2c_imx)
+{
+	if (i2c_imx_needs_interbyte_delay(i2c_imx, i2c_imx->msg))
+		udelay(i2c_imx->byte_time);
+}
+
 static inline int i2c_imx_isr_acked(struct imx_i2c_struct *i2c_imx)
 {
 	i2c_imx->isr_result = 0;
@@ -1100,6 +1116,7 @@ static inline int i2c_imx_isr_write(struct imx_i2c_struct *i2c_imx)
 	if (i2c_imx->msg->len == i2c_imx->msg_buf_idx)
 		return 0;
 
+	i2c_imx_interbyte_delay(i2c_imx);
 	imx_i2c_write_reg(i2c_imx->msg->buf[i2c_imx->msg_buf_idx++], i2c_imx, IMX_I2C_I2DR);
 
 	return 1;
@@ -1113,6 +1130,8 @@ static inline int i2c_imx_isr_read(struct imx_i2c_struct *i2c_imx)
 	result = i2c_imx_isr_acked(i2c_imx);
 	if (result)
 		return result;
+
+	i2c_imx_interbyte_delay(i2c_imx);
 
 	/* setup bus to read data */
 	temp = imx_i2c_read_reg(i2c_imx, IMX_I2C_I2CR);
@@ -1130,6 +1149,8 @@ static inline enum imx_i2c_state i2c_imx_isr_read_continue(struct imx_i2c_struct
 {
 	enum imx_i2c_state next_state = IMX_I2C_STATE_READ_CONTINUE;
 	unsigned int temp;
+
+	i2c_imx_interbyte_delay(i2c_imx);
 
 	if ((i2c_imx->msg->len - 1) == i2c_imx->msg_buf_idx) {
 		if (i2c_imx->is_lastmsg) {
@@ -1168,7 +1189,10 @@ static inline enum imx_i2c_state i2c_imx_isr_read_continue(struct imx_i2c_struct
 
 static inline void i2c_imx_isr_read_block_data_len(struct imx_i2c_struct *i2c_imx)
 {
-	u8 len = imx_i2c_read_reg(i2c_imx, IMX_I2C_I2DR);
+	u8 len;
+
+	i2c_imx_interbyte_delay(i2c_imx);
+	len = imx_i2c_read_reg(i2c_imx, IMX_I2C_I2DR);
 
 	if (len == 0 || len > I2C_SMBUS_BLOCK_MAX) {
 		i2c_imx->isr_result = -EPROTO;
@@ -1749,7 +1773,9 @@ static int i2c_imx_xfer_common(struct i2c_adapter *adapter,
 			(temp & I2SR_RXAK ? 1 : 0));
 #endif
 
-		use_dma = i2c_imx->dma && msgs[i].len >= DMA_THRESHOLD &&
+		use_dma = i2c_imx->dma &&
+			!i2c_imx_needs_interbyte_delay(i2c_imx, &msgs[i]) &&
+			msgs[i].len >= DMA_THRESHOLD &&
 			msgs[i].flags & I2C_M_DMA_SAFE;
 		if (msgs[i].flags & I2C_M_RD) {
 			int block_data = msgs->flags & I2C_M_RECV_LEN;
@@ -2087,6 +2113,46 @@ static const struct i2c_algorithm i2c_imx_algo_template = {
 	.unreg_slave = i2c_imx_unreg_slave,
 };
 
+static void i2c_imx_parse_interbyte_delay(struct platform_device *pdev,
+					  struct imx_i2c_struct *i2c_imx)
+{
+	u32 addr, delay;
+
+	for_each_available_child_of_node_scoped(pdev->dev.of_node, child) {
+		if (of_property_read_u32(child, "digi,byte-time-us", &delay))
+			continue;
+
+		if (!delay || delay > 100) {
+			dev_warn(&pdev->dev,
+				 "%pOF: ignoring invalid digi,byte-time-us value %u\n",
+				 child, delay);
+			continue;
+		}
+
+		if (of_property_read_u32(child, "reg", &addr) || addr > 0x7f) {
+			dev_warn(&pdev->dev,
+				 "%pOF: ignoring byte delay without a valid 7-bit reg\n",
+				 child);
+			continue;
+		}
+
+		if (i2c_imx->byte_time) {
+			dev_warn(&pdev->dev,
+				 "%pOF: only one inter-byte delay device is supported\n",
+				 child);
+			continue;
+		}
+
+		i2c_imx->byte_time = delay;
+		i2c_imx->byte_time_addr = addr;
+	}
+
+	if (i2c_imx->byte_time)
+		dev_info(&pdev->dev,
+			 "Digi inter-byte delay: %u us for address 0x%02x (IRQ non-DMA path)\n",
+			 i2c_imx->byte_time, i2c_imx->byte_time_addr);
+}
+
 static int i2c_imx_probe(struct platform_device *pdev)
 {
 	struct imx_i2c_struct *i2c_imx;
@@ -2206,6 +2272,8 @@ static int i2c_imx_probe(struct platform_device *pdev)
 				   "digi,buffer-time-us", &i2c_imx->buf_time);
 	if (ret)
 		i2c_imx->buf_time = 0;
+
+	i2c_imx_parse_interbyte_delay(pdev, i2c_imx);
 
 	if (of_property_read_bool(pdev->dev.of_node, "digi,atecc508a-workaround")) {
 		i2c_imx_algo->xfer = i2c_imx_xfer_atecc508a_workaround;

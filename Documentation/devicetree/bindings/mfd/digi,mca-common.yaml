@@ -38,6 +38,15 @@ properties:
     maxItems: 1
     description: GPIO used to force firmware update mode
 
+  digi,byte-time-us:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 1
+    maximum: 100
+    description:
+      Delay in microseconds before the I2C controller services each byte of
+      non-DMA transfers to this device. This allows devices without receive or
+      transmit FIFOs enough time to prepare the next byte while SCL is held low.
+
 required:
   - reg
   - interrupt-parent
