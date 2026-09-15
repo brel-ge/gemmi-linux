@@ -186,7 +186,6 @@
 		};
 
 		rng_workaround: sram@916000 {
-			compatible = "mmio-sram";
 			reg = <0x916000 0x2000>;
 		};
 
