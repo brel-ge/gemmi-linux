@@ -147,7 +147,6 @@
 		target = <&lcdif>;
 		__overlay__ {
 			status = "okay";
-			assigned-clock-rates = <498000000>, <68930000>, <400000000>, <133333333>;
 		};
 	};
 
