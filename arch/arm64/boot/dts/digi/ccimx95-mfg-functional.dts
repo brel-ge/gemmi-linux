@@ -224,7 +224,6 @@
 };
 
 &neoisp0 {
-	compatible = "nxp,imx95-b0-neoisp";
 	status = "okay";
 };
 

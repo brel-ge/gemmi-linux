@@ -31,6 +31,10 @@
 			os08a20: os08a20_mipi@36 {
 				compatible = "ovti,os08a20";
 				reg = <0x36>;
+				clocks = <&dummy>;
+				avdd-supply = <&reg_3v3_board>;
+				dovdd-supply = <&reg_3v3_board>;
+				dvdd-supply = <&reg_3v3_board>;
 				/* MIPI_CSI1_PWDN#: MCA PA3 */
 				reset-gpios = <&mca_gpio 0 GPIO_ACTIVE_LOW>;
 				orientation = <2>;
@@ -145,7 +149,6 @@
 	fragment@6 {
 		target = <&neoisp0>;
 		__overlay__ {
-			compatible = "nxp,imx95-b0-neoisp";
 			status = "okay";
 		};
 	};
