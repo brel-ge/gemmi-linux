@@ -33,6 +33,7 @@ ccimx9_som_overlays := ccimx9_bt.dtbo \
 
 ccimx95_som_overlays := ccimx95_bt.dtbo \
 			ccimx95_npu.dtbo \
+			ccimx95_smarc-bypass.dtbo \
 			ccimx95_wifi.dtbo
 
 ccimx9_dvk_overlays := ccimx9-dvk_enet2.dtbo \

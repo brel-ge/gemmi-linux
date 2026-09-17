@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright 2026 Digi International Inc.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			overlay-description = "SOM: SMARC bypass mode";
+		};
+	};
+
+	/* Enable SCMI BBM (RTC and ONOFF input) */
+	fragment@1 {
+		target = <&scmi_bbm>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+};
