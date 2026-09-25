@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
+#include <linux/reboot.h>
 #include <linux/soc/digi/som.h>
 #include <linux/suspend.h>
 #include <linux/pm_runtime.h>
@@ -1160,6 +1161,12 @@ reset_retry:
 	dev_err(pmca->dev, "failed to reboot!\n");
 }
 
+static int mca_restart(struct sys_off_data *data)
+{
+	mca_reset();
+	return NOTIFY_DONE;
+}
+
 static void mca_shutdown(void)
 {
 	switch (system_state) {
@@ -1454,6 +1461,13 @@ int mca_device_init(struct mca_drv *mca, u32 irq)
 		dev_err(mca->dev, "Cannot create sysfs dynamic entries (%d)\n",
 			ret);
 		goto out_sysfs_remove;
+	}
+
+	/* Only for 6UL. Other machines use their PSCI restart handlers. */
+	if (of_machine_is_compatible("digi,ccimx6ul")) {
+		ret = devm_register_restart_handler(mca->dev, mca_restart, mca);
+		if (ret)
+			goto out_sysfs_remove;
 	}
 
 	pmca = mca;
