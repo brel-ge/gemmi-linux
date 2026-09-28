@@ -580,6 +580,7 @@
 };
 
 &usb3_phy {
+	orientation-switch;
 	fsl,phy-pcs-tx-deemph-3p5db-attenuation-db = <17>;
 	fsl,phy-pcs-tx-swing-full-percent = <100>;
 	fsl,phy-tx-preemp-amp-tune-microamp = <600>;
