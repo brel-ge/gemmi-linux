@@ -144,21 +144,6 @@
 	status = "okay";
 };
 
-&mipi_csi {
-	status = "okay";
-
-	/* Camera 0 MIPI CSI */
-	port {
-		mipi_csi0_ep: endpoint {
-			remote-endpoint = <&ov5640_mipi_ep>;
-			data-lanes = <2>;
-			cfg-clk-range = <28>;
-			hs-clk-range = <0x16>;
-			bus-type = <4>;
-		};
-	};
-};
-
 /* MIPI DSI PHY */
 &dphy {
 	status = "okay";
@@ -252,29 +237,6 @@
 			power-role = "source";
 			data-role = "dual";
 			source-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
-		};
-	};
-
-	/* MIPI-CSI camera */
-	ov5640_mipi: ov5640_mipi@3c {
-		compatible = "ovti,ov5640";
-		reg = <0x3c>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&pinctrl_mipi>;
-		clocks = <&mipi_csi_xtal24m>;
-		clock-names = "xclk";
-		csi_id = <0>;
-		powerdown-gpios = <&gpio2 22 GPIO_ACTIVE_LOW>;
-		mclk = <24000000>;
-		mclk_source = <0>;
-		mipi_csi;
-		status = "okay";
-		port {
-			ov5640_mipi_ep: endpoint {
-				remote-endpoint = <&mipi_csi0_ep>;
-				data-lanes = <1 2>;
-				clocks-lanes = <0>;
-			};
 		};
 	};
 };
