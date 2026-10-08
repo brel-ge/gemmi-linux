@@ -14,6 +14,7 @@
  */
 
 #include <dt-bindings/usb/pd.h>
+#include <dt-bindings/phy/phy.h>
 / {
 	aliases {
 		i2c0 = &i2c0;
@@ -511,11 +512,17 @@
 };
 
 /* PCIe (Wireless), disabled by default */
-&pcieb{
+&pcieb {
+	phys = <&hsio_phy 0 PHY_TYPE_PCIE 0>;
+	phy-names = "pcie-phy";
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_pcieb>;
 	reset-gpio = <&lsio_gpio4 0 GPIO_ACTIVE_LOW>;
 	status = "disabled";
+};
+
+&hsio_phy {
+	fsl,hsio-cfg = "pciea-x2-pcieb";
 };
 
 &hsio_refa_clk {
