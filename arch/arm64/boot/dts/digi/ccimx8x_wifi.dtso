@@ -53,9 +53,20 @@
 	fragment@3 {
 		target = <&pcieb>;
 		__overlay__ {
+			#address-cells = <3>;
+			#size-cells = <2>;
 			vpcie-supply = <&reg_rf_wl_en>;
 			digi,disable_pci_msi;
 			status = "okay";
+
+			pcie@0 {
+				reg = <0 0 0 0 0>;
+				#address-cells = <3>;
+				#size-cells = <2>;
+				device_type = "pci";
+				ranges;
+				aspm-no-l0s;
+			};
 		};
 	};
 
