@@ -156,12 +156,4 @@
 			status = "okay";
 		};
 	};
-
-	/* Enable Neo ISP */
-	fragment@7 {
-		target = <&neoisp0>;
-		__overlay__ {
-			status = "okay";
-		};
-	};
 };
