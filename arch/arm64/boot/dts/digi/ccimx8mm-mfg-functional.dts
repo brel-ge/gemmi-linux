@@ -26,6 +26,11 @@
 	compatible = "digi,ccimx8mm-dvk", "digi,ccimx8mm", "digi,ccimx8m", "digi,ccimx8", "fsl,imx8mm";
 	digi,machine,name = "ccimx8mm-dvk";
 
+	display-subsystem {
+		compatible = "fsl,imx-display-subsystem";
+		ports = <&lcdif_disp0>;
+	};
+
 	chosen {
 		bootargs = "console=ttymxc0,115200 earlycon=ec_imx6q,0x30860000,115200";
 		stdout-path = &uart1;
@@ -135,7 +140,17 @@
 };
 
 &lcdif {
+	compatible = "fsl,imx8mm-lcdif";
+	clocks = <&clk IMX8MM_CLK_LCDIF_PIXEL>,
+		 <&clk IMX8MM_CLK_DISP_AXI_ROOT>,
+		 <&clk IMX8MM_CLK_DISP_APB_ROOT>;
+	clock-names = "pix", "disp-axi", "disp-apb";
+	assigned-clock-rates = <594000000>, <500000000>, <200000000>;
 	status = "okay";
+
+	/* Add a label to the LCDIF port defined in the SoC DTSI. */
+	lcdif_disp0: port {
+	};
 };
 
 &mipi_csi {
@@ -164,12 +179,31 @@
 	status = "okay";
 	#address-cells = <0x1>;
 	#size-cells = <0x0>;
+	clocks = <&clk IMX8MM_CLK_DSI_CORE>,
+		 <&clk IMX8MM_CLK_DSI_PHY_REF>,
+		 <&clk IMX8MM_CLK_DISP_APB_ROOT>;
+	clock-names = "cfg", "pll-ref", "apb-root";
+	assigned-clocks = <&clk IMX8MM_CLK_DSI_CORE>,
+			  <&clk IMX8MM_CLK_DSI_PHY_REF>;
+	assigned-clock-parents = <&clk IMX8MM_SYS_PLL1_266M>,
+				 <&clk IMX8MM_CLK_24M>;
+	assigned-clock-rates = <266000000>, <12000000>;
 
 	panel@0 {
 		compatible = "introspect,sv4e-mipi-analyzer";
 		reg = <0>;
 		status = "okay";
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mipi_dsi_out>;
+			};
+		};
 	};
+};
+
+&mipi_dsi_out {
+	remote-endpoint = <&panel_in>;
 };
 
 &pcie_phy {

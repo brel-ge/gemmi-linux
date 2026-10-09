@@ -482,6 +482,10 @@
 	};
 };
 
+&netcmix_blk_ctrl {
+	status = "okay";
+};
+
 &netc_blk_ctrl {
 	netc-interfaces = <NXP_NETC_RGMII
 			   NXP_NETC_RGMII

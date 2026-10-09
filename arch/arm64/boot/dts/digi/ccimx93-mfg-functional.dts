@@ -110,14 +110,25 @@
 &mipi_csi {
 	status = "okay";
 
-	/* Camera 0 MIPI CSI */
-	port {
-		mipi_csi0_ep: endpoint {
-			remote-endpoint = <&ov5640_mipi_ep>;
-			data-lanes = <2>;
-			cfg-clk-range = <28>;
-			hs-clk-range = <0x16>;
-			bus-type = <4>;
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			mipi_csi_ep: endpoint {
+				remote-endpoint = <&ov5640_mipi_ep>;
+				data-lanes = <1 2>;
+				clock-lanes = <0>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+			mipi_csi_out: endpoint {
+				remote-endpoint = <&isi_in>;
+			};
 		};
 	};
 };
@@ -125,6 +136,10 @@
 /* MIPI DSI PHY */
 &dphy {
 	status = "disabled";
+};
+
+&dphy_rx {
+	status = "okay";
 };
 
 &dsi {
@@ -156,6 +171,16 @@
 			mipi_dsi_panel_out: endpoint {
 				remote-endpoint = <&mipi_dsi_panel_in>;
 			};
+		};
+	};
+};
+
+&isi {
+	status = "okay";
+
+	port {
+		isi_in: endpoint {
+			remote-endpoint = <&mipi_csi_out>;
 		};
 	};
 };
@@ -193,7 +218,6 @@
 
 &lcdif {
 	status = "okay";
-	assigned-clock-rates = <645000000>, <17000000>, <400000000>, <133333333>;
 };
 
 /* LPI2C4 connected to MIPI Camera connector */
@@ -214,17 +238,15 @@
 		pinctrl-0 = <&pinctrl_mipi_camera>;
 		clocks = <&mipi_csi_xtal24m>;
 		clock-names = "xclk";
-		csi_id = <0>;
 		powerdown-gpios = <&gpio2 21 GPIO_ACTIVE_LOW>;
-		mclk = <24000000>;
-		mclk_source = <0>;
-		mipi_csi;
+		digi,use-pm-ops;
 		status = "okay";
+
 		port {
 			ov5640_mipi_ep: endpoint {
-				remote-endpoint = <&mipi_csi0_ep>;
+				remote-endpoint = <&mipi_csi_ep>;
 				data-lanes = <1 2>;
-				clocks-lanes = <0>;
+				clock-lanes = <0>;
 			};
 		};
 	};

@@ -26,6 +26,11 @@
 	status = "okay";
 };
 
+&hsio_phy {
+	fsl,refclk-pad-mode = "input";
+	status = "okay";
+};
+
 /* RF regulators */
 &reg_3v3_rf {
 	status = "okay";
@@ -40,9 +45,19 @@
 };
 
 &pcieb {
-	clkreq-gpio = <&lsio_gpio4 1 GPIO_ACTIVE_LOW>;
+	#address-cells = <3>;
+	#size-cells = <2>;
 	vpcie-supply = <&reg_rf_wl_en>;
 	digi,disable_pci_msi;
+
+	pcie@0 {
+		reg = <0 0 0 0 0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		device_type = "pci";
+		ranges;
+		aspm-no-l0s;
+	};
 };
 
 /* IOMUX */

@@ -135,6 +135,10 @@
 	os08a20: os08a20_mipi@36 {
 		compatible = "ovti,os08a20";
 		reg = <0x36>;
+		clocks = <&dummy>;
+		avdd-supply = <&reg_3v3_ext>;
+		dovdd-supply = <&reg_3v3_ext>;
+		dvdd-supply = <&reg_3v3_ext>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_mipi_camera>;
 		reset-gpios = <&gpio3 0 GPIO_ACTIVE_LOW>;
