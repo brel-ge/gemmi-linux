@@ -46,7 +46,7 @@
 		__overlay__ {
 			pinctrl-names = "default";
 			pinctrl-0 = <&pinctrl_pcieb_mini_card>;
-			reset-gpio = <&lsio_gpio3 16 GPIO_ACTIVE_LOW>; /* PCIE_RESET_N */
+			reset-gpios = <&lsio_gpio3 16 GPIO_ACTIVE_LOW>; /* PCIE_RESET_N */
 			disable-gpio = <&lsio_gpio0 30 GPIO_ACTIVE_HIGH>; /* PCIE_DIS_N */
 			vpcie-supply = <&reg_3v3_pcie>;
 			status = "okay";
