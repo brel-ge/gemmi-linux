@@ -8,6 +8,7 @@
 #include <linux/of_address.h>
 #include <linux/miscdevice.h>
 #include <linux/mutex.h>
+#include <linux/platform_device.h>
 
 #include "compat.h"
 #include "regs.h"
@@ -51,7 +52,7 @@ static int gen_mem_decap(void __user *keyblobbuf,
 		int bloblen, void __user *kmodbuf, void __user *outbuf);
 static long kb_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static int caam_keyblob_probe(struct platform_device *pdev);
-static int caam_keyblob_remove(struct platform_device *pdev);
+static void caam_keyblob_remove(struct platform_device *pdev);
 
 static void sm_key_job_done(struct device *dev, u32 *desc,
 		u32 err, void *context)
@@ -642,10 +643,9 @@ err:
 /*
  * Remove key blob device
  */
-static int caam_keyblob_remove(struct platform_device *pdev)
+static void caam_keyblob_remove(struct platform_device *pdev)
 {
-    kb_device_destroy(kb_dev);
-	return 0;
+	kb_device_destroy(kb_dev);
 }
 
 static struct of_device_id caam_keyblob_match[] = {
