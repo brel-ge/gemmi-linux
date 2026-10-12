@@ -518,6 +518,14 @@ config SPI_IMX
 	help
 	  This enables support for the Freescale i.MX SPI controllers.
 
+config SPI_IMX_BREL
+	tristate "Bruetsch elekronik i.MX SPI controllers"
+	depends on ARCH_MXC || COMPILE_TEST
+	help
+	  This enables using the Freescale i.MX SPI controllers in master
+	  mode. Its the same driver as the SPI_IMX except that he has other
+	  compibility manufacturer (brel). This is used in gemmi for spi 2
+	  to update the ecp5 flash which is normally controlled by ecp5.
 config SPI_INGENIC
 	tristate "Ingenic SoCs SPI controller"
 	depends on MACH_INGENIC || COMPILE_TEST
