@@ -53,6 +53,7 @@
 #include <video/mxc_edid.h>
 #include <video/mxc_hdmi.h>
 #include "mxc_dispdrv.h"
+#include "../core/fb_internal.h"
 
 #include <linux/mfd/mxc-hdmi-core.h>
 
