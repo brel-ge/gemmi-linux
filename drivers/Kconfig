@@ -185,6 +185,8 @@ source "drivers/soc/Kconfig"
 
 source "drivers/pmdomain/Kconfig"
 
+source "drivers/som/Kconfig"
+
 source "drivers/devfreq/Kconfig"
 
 source "drivers/extcon/Kconfig"
