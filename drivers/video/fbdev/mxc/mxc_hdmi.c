@@ -1987,6 +1987,8 @@ static void mxc_hdmi_cable_connected(struct mxc_hdmi *hdmi)
 		break;
 	}
 
+  //For gemmi use fix the deafault mode 1920x1080p
+	mxc_hdmi_default_modelist(hdmi);
 	/* Setting video mode */
 	mxc_hdmi_set_mode(hdmi);
 
