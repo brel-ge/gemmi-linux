@@ -176,7 +176,7 @@ err:
 	return error;
 }
 
-static int da9063_led_remove(struct platform_device *pdev)
+static void da9063_led_remove(struct platform_device *pdev)
 {
 	struct da9063_leds *leds = platform_get_drvdata(pdev);
 	struct da9063 *da9063;
@@ -190,8 +190,6 @@ static int da9063_led_remove(struct platform_device *pdev)
 		led_classdev_unregister(&leds->led[i]->cdev);
 		cancel_work_sync(&leds->led[i]->work);
 	}
-
-	return 0;
 }
 
 static const struct of_device_id of_da9063_leds_match[] = {
