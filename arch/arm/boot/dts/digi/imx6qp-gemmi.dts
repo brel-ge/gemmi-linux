@@ -1,0 +1,182 @@
+/*
+ * Copyright 2017,2018 Digi International Inc.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+/dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
+/* i.MX6 QuadPlus CPU */
+#include "../nxp/imx/imx6qp.dtsi"
+/* ConnectCore 6 QuadPlus */
+#include "imx6qp-ccimx6.dtsi"
+/* ConnectCore 6 QuadPlus SBC carrier board */
+#include "imx6qp-gemmi.dtsi"
+
+&audmux {
+	status = "okay";
+};
+
+&caam_keyblob {
+	status = "okay";
+};
+
+
+&codec_power {
+	status = "okay";
+};
+
+
+&ecspi2 {
+	status = "okay";
+	compatible = "brel,imx6q-ecspi", "brel,imx51-ecspi";
+
+	flash: m25p80@0 {
+		#address-cells = <1>;
+		#size-cells = <1>;
+        compatible = "micron,n25q128a13", "jedec,spi-nor";
+		spi-max-frequency = <20000000>;
+		reg = <0>;
+	};
+};
+
+&fec {
+	status = "okay";
+};
+
+&hdmi_core {
+	status = "okay";
+};
+
+&hdmi_video {
+	status = "okay";
+};
+
+&hdmi_audio {
+	status = "okay";
+};
+
+&i2c1 {
+	status = "okay";
+};
+
+&i2c3 {
+	status = "okay";
+
+	edid@50 {
+		status = "okay";
+	};
+
+
+	sgtl5000: codec@a {
+		status = "okay";
+	};
+
+	gemmi_cam_bridge_0: gemmi_cam_bridge@4 {
+		status = "okay";
+	};
+
+	gemmi_cam_bridge_1: gemmi_cam_bridge@6 {
+		status = "okay";
+	};
+};
+
+&lcd {
+	status = "okay";
+};
+
+
+&mxcfb1 {
+	prefetch;
+	status = "okay";
+};
+
+&mxcfb2 {
+	prefetch;
+	status = "okay";
+};
+
+&pre1 {
+	status = "okay";
+};
+
+&pre2 {
+	status = "okay";
+};
+
+&pre3 {
+	status = "okay";
+};
+
+&pre4 {
+	status = "okay";
+};
+
+&prg1 {
+	memory-region = <&memory>;
+	status = "okay";
+};
+
+&prg2 {
+	memory-region = <&memory>;
+	status = "okay";
+};
+/* activate if sound over hdmi is needed
+&sound_hdmi {
+	status = "okay";
+};
+*/
+
+&sound_sgtl5000 {
+	status = "okay";
+};
+
+&ssi2 {
+	status = "okay";
+};
+
+&uart1 {
+	status = "disabled";
+};
+
+&uart3 {
+	status = "disabled";
+};
+
+&uart4 {
+	status = "okay";
+};
+
+&uart5 {
+	status = "disabled";
+};
+
+&usbh1 {
+	status = "okay";
+};
+
+&usdhc2 {
+	status = "okay";
+};
+
+&v4l2_cap_0 {
+	status = "okay";
+};
+
+&v4l2_cap_1 {
+	status = "okay";
+};
+
+&v4l2_out {
+	status = "okay";
+};

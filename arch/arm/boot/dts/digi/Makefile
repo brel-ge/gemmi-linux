@@ -14,4 +14,5 @@ dtb-$(CONFIG_SOC_IMX6Q) += \
 	imx6qp-ccimx6qp-mfg-rf.dtb \
 	imx6qp-ccimx6qpsbc.dtb \
 	imx6qp-ccimx6qpsbc-id160.dtb \
-	imx6qp-ccimx6qpsbc-wb.dtb
+	imx6qp-ccimx6qpsbc-wb.dtb \
+	imx6qp-gemmi.dtb
