@@ -9,7 +9,6 @@
 #include <linux/i2c.h>
 #include <linux/gpio/consumer.h>
 #include <linux/clk.h>
-#include <linux/gpio.h>
 #include <linux/slab.h>
 #include <sound/jack.h>
 #include <sound/soc.h>
@@ -29,7 +28,7 @@ struct imx_sgtl5000_data {
 };
 
 struct imx_priv {
-	int hp_gpio;
+	struct gpio_desc *hp_desc;
 	int hp_gpio_active_low;
 	int hp_gpio_debounce_time;
 	struct platform_device *pdev;
@@ -60,7 +59,7 @@ static int hpjack_status_check(void *data)
 	char *envp[3], *buf;
 	int hp_status, ret;
 
-	hp_status = gpio_get_value(priv->hp_gpio);
+	hp_status = gpiod_get_value(priv->hp_desc);
 
 	buf = kmalloc(32, GFP_ATOMIC);
 	if (!buf) {
@@ -94,7 +93,7 @@ static int imx_sgtl5000_dai_init(struct snd_soc_pcm_runtime *rtd)
 	struct imx_priv *priv = &card_priv;
 	int ret;
 
-	if (gpio_is_valid(priv->hp_gpio)) {
+	if (priv->hp_desc) {
 		imx_hp_jack_gpio.jack_status_check = hpjack_status_check;
 		snd_soc_card_jack_new_pins(rtd->card, "Headphone Jack",
 				      SND_JACK_HEADPHONE, &imx_hp_jack,
@@ -118,13 +117,13 @@ static ssize_t headphone_show(struct device_driver *dev, char *buf)
 	struct imx_priv *priv = &card_priv;
 	int hp_status;
 
-	if (!gpio_is_valid(priv->hp_gpio)) {
+	if (!priv->hp_desc) {
 		strcpy(buf, "no detect gpio connected\n");
 		return strlen(buf);
 	}
 
 	/* Check if headphone is plugged in */
-	hp_status = gpio_get_value(priv->hp_gpio) ? 1 : 0;
+	hp_status = gpiod_get_value(priv->hp_desc) ? 1 : 0;
 
 	if (hp_status != priv->hp_gpio_active_low)
 		strcpy(buf, "headphone\n");
@@ -155,7 +154,6 @@ static int imx_sgtl5000_probe(struct platform_device *pdev)
 	int int_port, ext_port;
 	int ret;
 	struct imx_priv *priv = &card_priv;
-	struct gpio_desc *hp_desc;
 
 	priv->pdev = pdev;
 
@@ -170,12 +168,13 @@ static int imx_sgtl5000_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	hp_desc = fwnode_gpiod_get_index(of_fwnode_handle(np), "hp-det", 0,
-			GPIOD_OUT_LOW, "hp-det");
+	priv->hp_desc = devm_gpiod_get_optional(&pdev->dev, "hp-det", GPIOD_IN);
+	if (IS_ERR(priv->hp_desc))
+		return dev_err_probe(&pdev->dev, PTR_ERR(priv->hp_desc),
+				     "failed to get hp-det gpio\n");
 
-	if (hp_desc) {
-		priv->hp_gpio = gpiod_to_irq(hp_desc);
-		imx_hp_jack_gpio.gpio = priv->hp_gpio;
+	if (priv->hp_desc) {
+		imx_hp_jack_gpio.desc = priv->hp_desc;
 		imx_hp_jack_gpio.invert = priv->hp_gpio_active_low;
 		priv->hp_gpio_debounce_time = DEFAULT_DEBOUNCE_TIME;
 		of_property_read_u32(np, "hp-det-debounce",
@@ -290,7 +289,7 @@ static int imx_sgtl5000_probe(struct platform_device *pdev)
 		goto put_device;
 	}
 
-	if (gpio_is_valid(priv->hp_gpio)) {
+	if (priv->hp_desc) {
 		ret = driver_create_file(pdev->dev.driver,
 					 &driver_attr_headphone);
 		if (ret) {
