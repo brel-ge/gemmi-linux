@@ -10,14 +10,15 @@
  *
  * @ingroup IPU
  */
+#define DEBUG
 
 #include <linux/dma-mapping.h>
 #include <linux/console.h>
 #include <linux/ipu.h>
 #include <linux/module.h>
 #include <linux/mxcfb.h>
-#include <mach/hardware.h>
-#include <mach/mipi_csi2.h>
+//#include <mach-imx/hardware.h>
+#include <linux/mipi_csi2.h>
 #include "mxc_v4l2_capture.h"
 #include "ipu_prp_sw.h"
 
@@ -87,6 +88,7 @@ static int prpvf_start(void *private)
 		pr_debug("already started.\n");
 		return 0;
 	}
+        printk(KERN_ERR "prpvf_start()!\n");
 
 	get_disp_ipu(cam);
 
@@ -130,6 +132,13 @@ static int prpvf_start(void *private)
 	err = fb_set_var(fbi, &fbvar);
 	if (err)
 		printk(KERN_WARNING "fb_set_var err code %d\n", err);
+	pr_debug("prpvf_start() vf_out_format: %d\n", vf_out_format);
+	pr_debug("prpvf_start() fbvar.nonstd: %d\n", fbvar.nonstd);
+	pr_debug("prpvf_start() fbvar.xres: %d\n", fbvar.xres);
+	pr_debug("prpvf_start() fbvar.yres: %d\n", fbvar.yres);
+	pr_debug("prpvf_start() fbvar.accel_flags: %d\n", fbvar.accel_flags);
+	pr_debug("prpvf_start() fbvar.activate: %d\n", fbvar.activate);
+
 
 	ipu_disp_set_window_pos(disp_ipu, MEM_FG_SYNC, cam->win.w.left,
 			cam->win.w.top);
@@ -164,6 +173,11 @@ static int prpvf_start(void *private)
 	}
 	vf.csi_prp_vf_mem.out_pixel_fmt = vf_out_format;
 	size = cam->win.w.width * cam->win.w.height * size;
+
+	printk(KERN_ERR "prpvf_start() vf.csi_prp_vf_mem.in_width: %d\n",
+	       vf.csi_prp_vf_mem.in_width);
+	printk(KERN_ERR "prpvf_start() vf.csi_prp_vf_mem.in_height: %d\n",
+	       vf.csi_prp_vf_mem.in_height);
 
 #ifdef CONFIG_MXC_MIPI_CSI2
 	mipi_csi2_info = mipi_csi2_get_info();
@@ -236,6 +250,15 @@ static int prpvf_start(void *private)
 	pr_debug("vf_bufs %x %x\n", cam->vf_bufs[0], cam->vf_bufs[1]);
 
 	if (cam->vf_rotation >= IPU_ROTATE_VERT_FLIP) {
+
+	        printk(KERN_ERR "prpvf rot cam->ipu_id: %d\n", cam->ipu_id);
+	        printk(KERN_ERR "prpvf rot vf_out_format: %d\n", vf_out_format);
+	        printk(KERN_ERR "prpvf rot height: %d\n",
+			vf.csi_prp_vf_mem.out_height);
+	        printk(KERN_ERR "prpvf rot width: %d\n",
+			vf.csi_prp_vf_mem.out_width);
+	        printk(KERN_ERR "prpvf rot cam.csi: %d\n", cam->csi);
+	        printk(KERN_ERR "prpvf rot vf_rotation: %d\n", cam->vf_rotation);
 		err = ipu_init_channel_buffer(cam->ipu, CSI_PRP_VF_MEM,
 					      IPU_OUTPUT_BUFFER,
 					      vf_out_format,
@@ -281,7 +304,7 @@ static int prpvf_start(void *private)
 					      vf_out_format,
 					      vf.csi_prp_vf_mem.out_height,
 					      vf.csi_prp_vf_mem.out_width,
-					      vf.csi_prp_vf_mem.out_height,
+					      vf.csi_prp_vf_mem.out_width,
 					      IPU_ROTATE_NONE,
 					      fbi->fix.smem_start +
 					      (fbi->fix.line_length *
@@ -320,6 +343,11 @@ static int prpvf_start(void *private)
 		ipu_select_buffer(cam->ipu, MEM_ROT_VF_MEM,
 				  IPU_OUTPUT_BUFFER, 0);
 	} else {
+	        printk(KERN_ERR "prpvf_start() cam->ipu_id: %d\n", cam->ipu_id);
+	        printk(KERN_ERR "prpvf_start() vf_out_format: %d\n", vf_out_format);
+	        printk(KERN_ERR "prpvf_start() height: %d\n", cam->win.w.height);
+	        printk(KERN_ERR "prpvf_start() width: %d\n", cam->win.w.width);
+	        printk(KERN_ERR "prpvf_start() cam.csi: %d\n", cam->csi);
 		err = ipu_init_channel_buffer(cam->ipu, CSI_PRP_VF_MEM,
 					      IPU_OUTPUT_BUFFER,
 					      vf_out_format, cam->win.w.width,
