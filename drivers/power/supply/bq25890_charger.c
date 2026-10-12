@@ -692,6 +692,17 @@ static int bq25890_power_supply_set_property(struct power_supply *psy,
 	u8 lval;
 
 	switch (psp) {
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
+		/*
+		 * Gemmi: the application sets the charge current through
+		 * constant_charge_current_max, as on the 4.9 kernel. This
+		 * also raises/lowers the limit for constant_charge_current.
+		 */
+		lval = bq25890_find_idx(val->intval, TBL_ICHG);
+		ret = bq25890_field_write(bq, F_ICHG, lval);
+		if (!ret)
+			bq->init_data.ichg = lval;
+		return ret;
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 		maxval = bq25890_find_val(bq->init_data.ichg, TBL_ICHG);
 		lval = bq25890_find_idx(min(val->intval, maxval), TBL_ICHG);
@@ -718,6 +729,7 @@ static int bq25890_power_supply_property_is_writeable(struct power_supply *psy,
 						      enum power_supply_property psp)
 {
 	switch (psp) {
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
@@ -970,6 +982,19 @@ static int bq25890_hw_init(struct bq25890_device *bq)
 	if (ret)
 		return ret;
 
+	/* Gemmi: enable input current optimizer and force a detection run */
+	ret = bq25890_field_write(bq, F_ICO_EN, 1);
+	if (ret < 0) {
+		dev_dbg(bq->dev, "Config ICO_EN failed %d\n", ret);
+		return ret;
+	}
+
+	ret = bq25890_field_write(bq, F_FORCE_ICO, 1);
+	if (ret < 0) {
+		dev_dbg(bq->dev, "Config FORCE_ICO failed %d\n", ret);
+		return ret;
+	}
+
 	ret = bq25890_get_chip_state(bq, &bq->state);
 	if (ret < 0) {
 		dev_dbg(bq->dev, "Get state failed %d\n", ret);
@@ -1030,7 +1055,11 @@ static int bq25890_power_supply_init(struct bq25890_device *bq)
 	if (bq->id < 0)
 		return bq->id;
 
-	snprintf(bq->name, sizeof(bq->name), "bq25890-charger-%d", bq->id);
+	/* Gemmi: keep the 4.9 name "bq25890-charger" for the first charger */
+	if (bq->id == 0)
+		snprintf(bq->name, sizeof(bq->name), "bq25890-charger");
+	else
+		snprintf(bq->name, sizeof(bq->name), "bq25890-charger-%d", bq->id);
 	bq->desc = bq25890_power_supply_desc;
 	bq->desc.name = bq->name;
 
