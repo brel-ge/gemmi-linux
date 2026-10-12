@@ -39,6 +39,7 @@ enum {
 	GPIO_SYSFS_LINE_CLASS_ATTR_VALUE,
 	GPIO_SYSFS_LINE_CLASS_ATTR_EDGE,
 	GPIO_SYSFS_LINE_CLASS_ATTR_ACTIVE_LOW,
+	GPIO_SYSFS_LINE_CLASS_ATTR_DEBOUNCE,
 	GPIO_SYSFS_LINE_CLASS_ATTR_SENTINEL,
 	GPIO_SYSFS_LINE_CLASS_ATTR_SIZE,
 };
@@ -74,6 +75,7 @@ struct gpiod_data {
 #if IS_ENABLED(CONFIG_GPIO_SYSFS_LEGACY)
 	struct device_attribute edge_attr;
 	struct device_attribute active_low_attr;
+	struct device_attribute debounce_attr;
 
 	struct attribute *class_attrs[GPIO_SYSFS_LINE_CLASS_ATTR_SIZE];
 	struct attribute_group class_attr_group;
@@ -394,6 +396,24 @@ static ssize_t active_low_store(struct device *dev,
 	guard(mutex)(&data->mutex);
 
 	return gpio_sysfs_set_active_low(data, value) ?: size;
+}
+
+static ssize_t debounce_store(struct device *dev,
+			      struct device_attribute *attr,
+			      const char *buf, size_t size)
+{
+	struct gpiod_data *data = container_of(attr, struct gpiod_data,
+					       debounce_attr);
+	unsigned int value;
+	ssize_t status;
+
+	status = kstrtouint(buf, 0, &value);
+	if (status)
+		return status;
+
+	guard(mutex)(&data->mutex);
+
+	return gpiod_set_debounce(data->desc, value) ?: size;
 }
 #endif /* CONFIG_GPIO_SYSFS_LEGACY */
 
@@ -782,6 +802,9 @@ int gpiod_export(struct gpio_desc *desc, bool direction_may_change)
 	gpiod_attr_init(&desc_data->edge_attr, "edge", edge_show, edge_store);
 	gpiod_attr_init(&desc_data->active_low_attr, "active_low",
 			active_low_show, active_low_store);
+	gpiod_attr_init(&desc_data->debounce_attr, "debounce",
+			NULL, debounce_store);
+	desc_data->debounce_attr.attr.mode = 0200;
 
 	attrs = desc_data->class_attrs;
 	desc_data->class_attr_group.is_visible = gpio_is_visible;
@@ -789,6 +812,7 @@ int gpiod_export(struct gpio_desc *desc, bool direction_may_change)
 	attrs[GPIO_SYSFS_LINE_CLASS_ATTR_VALUE] = &desc_data->val_attr.attr;
 	attrs[GPIO_SYSFS_LINE_CLASS_ATTR_EDGE] = &desc_data->edge_attr.attr;
 	attrs[GPIO_SYSFS_LINE_CLASS_ATTR_ACTIVE_LOW] = &desc_data->active_low_attr.attr;
+	attrs[GPIO_SYSFS_LINE_CLASS_ATTR_DEBOUNCE] = &desc_data->debounce_attr.attr;
 
 	desc_data->class_attr_group.attrs = desc_data->class_attrs;
 	desc_data->class_attr_groups[0] = &desc_data->class_attr_group;
