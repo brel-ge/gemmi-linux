@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0
+dtb-$(CONFIG_SOC_IMX6Q) += \
+	imx6dl-ccimx6sbc.dtb \
+	imx6dl-ccimx6sbc-id131.dtb \
+	imx6dl-ccimx6sbc-w.dtb \
+	imx6dl-ccimx6sbc-wb.dtb \
+	imx6q-ccimx6sbc.dtb \
+	imx6q-ccimx6sbc-id129.dtb \
+	imx6q-ccimx6sbc-id130.dtb \
+	imx6q-ccimx6sbc-w.dtb \
+	imx6q-ccimx6sbc-wb.dtb \
+	imx6q-ccimx6sbc-wb-ldo-bypass.dtb \
+	imx6qp-ccimx6qp-mfg.dtb \
+	imx6qp-ccimx6qp-mfg-rf.dtb \
+	imx6qp-ccimx6qpsbc.dtb \
+	imx6qp-ccimx6qpsbc-id160.dtb \
+	imx6qp-ccimx6qpsbc-wb.dtb
