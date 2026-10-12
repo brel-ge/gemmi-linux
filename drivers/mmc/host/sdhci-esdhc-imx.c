@@ -1873,8 +1873,10 @@ sdhci_esdhc_imx_probe_dt(struct platform_device *pdev,
 
 	of_property_read_u32(np, "fsl,strobe-dll-delay-target",
 				&boarddata->strobe_dll_delay_target);
-	if (of_property_read_bool(np, "no-1-8-v"))
+	if (of_property_read_bool(np, "no-1-8-v")) {
 		host->quirks2 |= SDHCI_QUIRK2_NO_1_8_V;
+		host->quirks2 &= ~SDHCI_QUIRK2_CAPS_BIT63_FOR_HS400;
+	}
 
 	if (of_property_read_u32(np, "fsl,delay-line", &boarddata->delay_line))
 		boarddata->delay_line = 0;
@@ -1975,8 +1977,8 @@ static int sdhci_esdhc_imx_probe(struct platform_device *pdev)
 		host->mmc->caps |= MMC_CAP_1_8V_DDR | MMC_CAP_3_3V_DDR;
 
 		/* GPIO CD can be set as a wakeup source */
-		if (!(imx_data->socdata->flags & ESDHC_FLAG_SKIP_CD_WAKE))
-			host->mmc->caps |= MMC_CAP_CD_WAKE;
+		/* Uncomment the next line to enable GPIO CD as wakeup source */
+		// host->mmc->caps |= MMC_CAP_CD_WAKE;
 
 		if (!(imx_data->socdata->flags & ESDHC_FLAG_HS200))
 			host->quirks2 |= SDHCI_QUIRK2_BROKEN_HS200;

@@ -36,6 +36,7 @@
 #include "../../pci.h"
 #include "../pci-host-common.h"
 #include "pcie-designware.h"
+#include "../../pci.h"
 
 #define IMX8MQ_GPR_PCIE_REF_USE_PAD		BIT(9)
 #define IMX8MQ_GPR_PCIE_CLK_REQ_OVERRIDE_EN	BIT(10)
@@ -2029,6 +2030,10 @@ static int imx_pcie_probe(struct platform_device *pdev)
 	if (of_property_read_u32(node, "fsl,tx-swing-low",
 				 &imx_pcie->tx_swing_low))
 		imx_pcie->tx_swing_low = 127;
+
+	/* Disable PCI MSI support when property is present */
+	if (of_property_read_bool(node, "digi,disable_pci_msi"))
+		pci_no_msi();
 
 	/* Limit link speed */
 	pci->max_link_speed = 1;
