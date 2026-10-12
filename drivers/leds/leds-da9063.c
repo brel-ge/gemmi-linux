@@ -57,7 +57,7 @@ static int da9063_set_led_brightness(struct da9063_led *led)
 	if(led->inverse_polarity)
 		led->brightness = DA9063_MAX_BRIGHTNESS - led->brightness;
 
-	val = (led->brightness & 0x7f) | DA9063_GPIO_DIM;
+	val = (led->brightness & 0x7f);
 
 	error = regmap_write(led->da9063->regmap, led->led_reg, val);
 	if (error < 0)
@@ -130,9 +130,9 @@ static int da9063_led_probe(struct platform_device *pdev)
 		led = da9063_leds.led[i];
 		led->cdev.name = np->name;
 		led->cdev.brightness_set = da9063_led_set;
-		led->cdev.brightness = DA9063_HALF_BRIGHTNESS;
+		led->cdev.brightness = DA9063_MAX_BRIGHTNESS;
 		led->cdev.max_brightness = DA9063_MAX_BRIGHTNESS;
-		led->brightness = DA9063_HALF_BRIGHTNESS;
+		led->brightness = DA9063_MAX_BRIGHTNESS;
 		led->led_index = i;
 		of_property_read_u32(np, "dlg,led-reg", &led->led_reg);
 		of_property_read_u32_index(np, "dlg,led-gpio-reg", 0, &led->gpio_reg);
