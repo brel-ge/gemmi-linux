@@ -1028,8 +1028,13 @@ static void __init imx6q_clocks_init(struct device_node *ccm_node)
 		clk_set_parent(hws[IMX6QDL_CLK_IPU2_SEL]->clk, hws[IMX6QDL_CLK_MMDC_CH0_AXI]->clk);
 	}
 
-	clk_set_parent(hws[IMX6QDL_CLK_IPU1_DI0_PRE_SEL]->clk, hws[IMX6QDL_CLK_PLL5_VIDEO_DIV]->clk);
-	clk_set_parent(hws[IMX6QDL_CLK_IPU1_DI1_PRE_SEL]->clk, hws[IMX6QDL_CLK_PLL5_VIDEO_DIV]->clk);
+	/*
+	 * Gemmi: drive the IPU1 DIs (parallel LCD) from PLL3 PFD1 and keep the
+	 * video PLL for the IPU2 DIs (HDMI), so both can run at the same time
+	 * and HDMI can use any pixel clock.
+	 */
+	clk_set_parent(hws[IMX6QDL_CLK_IPU1_DI0_PRE_SEL]->clk, hws[IMX6QDL_CLK_PLL3_PFD1_540M]->clk);
+	clk_set_parent(hws[IMX6QDL_CLK_IPU1_DI1_PRE_SEL]->clk, hws[IMX6QDL_CLK_PLL3_PFD1_540M]->clk);
 	clk_set_parent(hws[IMX6QDL_CLK_IPU2_DI0_PRE_SEL]->clk, hws[IMX6QDL_CLK_PLL5_VIDEO_DIV]->clk);
 	clk_set_parent(hws[IMX6QDL_CLK_IPU2_DI1_PRE_SEL]->clk, hws[IMX6QDL_CLK_PLL5_VIDEO_DIV]->clk);
 	clk_set_parent(hws[IMX6QDL_CLK_IPU1_DI0_SEL]->clk, hws[IMX6QDL_CLK_IPU1_DI0_PRE]->clk);
