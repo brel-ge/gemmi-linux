@@ -125,3 +125,11 @@ config FB_MXC_DCIC
 	depends on FB_MXC_SYNC_PANEL
 	depends on MXC_IPU_V3 || FB_MXS
 	select VIDEOMODE_HELPERS
+
+config FB_MXC_TC358768
+	tristate "TC358768/TC358778 Parallel MIPI-DSI converter support"
+	depends on I2C
+	depends on LCD_CLASS_DEVICE
+	select REGMAP_I2C
+	help
+	  Driver for the TC358768/TC358778 parallel MIPI-DSI converter.
