@@ -22,6 +22,7 @@
 #include <linux/platform_device.h>
 
 #include "mxc_dispdrv.h"
+#include "../core/fb_internal.h"
 
 struct mxc_lcd_platform_data {
 	u32 default_ifmt;
@@ -55,6 +56,18 @@ static struct fb_videomode lcdif_modedb[] = {
 	FB_SYNC_CLK_LAT_FALL,
 	FB_VMODE_NONINTERLACED,
 	0,},
+
+	{
+	/* 800x480 @ 60 Hz , pixel clk @ 159,4MHz -> 6273.5ps 
+   * Use 5921 ps since we use another clock source for the ISP.
+   * This results in a frequency aform abount 165MHz
+   */
+	"FORTEC", 60, 1200, 1920, 6024, 120, 80, 25, 35, 16, 2,
+	//FB_SYNC_CLK_LAT_FALL,
+	0,
+	FB_VMODE_NONINTERLACED,
+	0,},
+
 };
 static int lcdif_modedb_sz = ARRAY_SIZE(lcdif_modedb);
 
@@ -94,6 +107,15 @@ static int lcdif_init(struct mxc_dispdrv_handle *disp,
 
 	return ret;
 }
+static int lcdif_enable(struct mxc_dispdrv_handle *mddh,
+		      struct fb_info *fbi)
+{
+#if defined(CONFIG_LOGO)
+	fb_prepare_logo(fbi, 0);
+	fb_show_logo(fbi, 0);
+#endif
+	return 0;
+}
 
 static void lcdif_deinit(struct mxc_dispdrv_handle *disp)
 {
@@ -103,6 +125,7 @@ static void lcdif_deinit(struct mxc_dispdrv_handle *disp)
 static struct mxc_dispdrv_driver lcdif_drv = {
 	.name 	= DISPDRV_LCD,
 	.init 	= lcdif_init,
+	.enable = lcdif_enable,
 	.deinit	= lcdif_deinit,
 };
 
