@@ -18,6 +18,17 @@ config FB_LOGO_EXTRA
 	depends on FB=y
 	default y if SPU_BASE
 
+config FB_LOGO_CENTERED
+	bool "Show the logo centered in the screen"
+	depends on FB_CORE
+	help
+	  Default for fbcon=logo-pos:center, for systems without fbcon.
+
+config FB_LOGO_FORCE_SINGLE
+	bool "Show only one logo, even on SMP systems"
+	depends on FB_CORE
+	help
+	  Default for fbcon=logo-count:1, for systems without fbcon.
 config LOGO_LINUX_MONO
 	bool "Standard black and white Linux logo"
 	default y
