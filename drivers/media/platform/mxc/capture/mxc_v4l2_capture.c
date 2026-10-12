@@ -11,6 +11,7 @@
  *
  * @ingroup MXC_V4L2_CAPTURE
  */
+
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -420,6 +421,7 @@ static int mxc_streamon(cam_data *cam)
 					msecs_to_jiffies(1000));
 		if (err <= 0)
 			pr_warn("Timeout waiting on ready queue\n");
+		err = 0;
 	}
 
 	if (list_empty(&cam->ready_q)) {
@@ -524,7 +526,18 @@ static int mxc_streamoff(cam_data *cam)
 	if (cam->capture_on == false)
 		return 0;
 
+	/*
+	 * Gemmi: stop the viewfinder while the encoder is shut down and
+	 * restart it afterwards, so recording can stop while the preview
+	 * keeps running.
+	 */
+	if (cam->overlay_on == true)
+		stop_preview(cam);
+
 	err = mxc_enc_disable(cam);
+
+	if (cam->overlay_on == true)
+		start_preview(cam);
 
 	mxc_free_frames(cam);
 	mxc_capture_inputs[cam->current_input].status |= V4L2_IN_ST_NO_POWER;
@@ -1147,40 +1160,16 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 			tmp_rotation = IPU_ROTATE_180;
 			break;
 		case V4L2_MXC_ROTATE_90_RIGHT:
-			if (cam->win.w.width > 1024 || cam->win.w.height > 1024) {
-				pr_info("ROTATE_90_RIGHT not supported for resolutions above 1024\n");
-				ret = -EINVAL;
-				goto next;
-			} else {
-				tmp_rotation = IPU_ROTATE_90_RIGHT;
-			}
+			tmp_rotation = IPU_ROTATE_90_RIGHT;
 			break;
 		case V4L2_MXC_ROTATE_90_RIGHT_VFLIP:
-			if (cam->win.w.width > 1024 || cam->win.w.height > 1024) {
-				pr_info("ROTATE_90_RIGHT_VFLIP not supported for resolutions above 1024\n");
-				ret = -EINVAL;
-				goto next;
-			} else {
-				tmp_rotation = IPU_ROTATE_90_RIGHT_VFLIP;
-			}
+			tmp_rotation = IPU_ROTATE_90_RIGHT_VFLIP;
 			break;
 		case V4L2_MXC_ROTATE_90_RIGHT_HFLIP:
-			if (cam->win.w.width > 1024 || cam->win.w.height > 1024) {
-				pr_info("ROTATE_90_RIGHT_HFLIP not supported for resolutions above 1024\n");
-				ret = -EINVAL;
-				goto next;
-			} else {
-				tmp_rotation = IPU_ROTATE_90_RIGHT_HFLIP;
-			}
+			tmp_rotation = IPU_ROTATE_90_RIGHT_HFLIP;
 			break;
 		case V4L2_MXC_ROTATE_90_LEFT:
-			if (cam->win.w.width > 1024 || cam->win.w.height > 1024) {
-				pr_info("ROTATE_90_LEFT not supported for resolutions above 1024\n");
-				ret = -EINVAL;
-				goto next;
-			} else {
-				tmp_rotation = IPU_ROTATE_90_LEFT;
-			}
+			tmp_rotation = IPU_ROTATE_90_LEFT;
 			break;
 		default:
 			ret = -EINVAL;
@@ -1194,7 +1183,6 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 			cam->rotation = tmp_rotation;
 		#endif
 
-next:
 		break;
 	case V4L2_CID_HUE:
 		if (cam->sensor) {
@@ -1473,6 +1461,7 @@ static int mxc_v4l2_s_std(cam_data *cam, v4l2_std_id e)
 		video_index = TV_NOT_LOCKED;
 		pr_err("ERROR: unrecognized std! %llx (PAL=%llx, NTSC=%llx\n",
 			e, V4L2_STD_PAL, V4L2_STD_NTSC);
+		return 0;
 	}
 
 	cam->standard.index = video_index;
@@ -1546,7 +1535,7 @@ static int mxc_v4l_dqueue(cam_data *cam, struct v4l2_buffer *buf)
 
 	if (!wait_event_interruptible_timeout(cam->enc_queue,
 					      cam->enc_counter != 0,
-					      10 * HZ)) {
+					      HZ)) {
 		pr_err("ERROR: v4l2 capture: mxc_v4l_dqueue timeout "
 			"enc_counter %x\n",
 		       cam->enc_counter);
@@ -1803,7 +1792,6 @@ static int mxc_v4l_close(struct file *file)
 		wait_event_interruptible(cam->power_queue,
 					 cam->low_power == false);
 		pr_debug("mxc_v4l_close: release resource\n");
-
 		if (strcmp(mxc_capture_inputs[cam->current_input].name,
 			   "CSI MEM") == 0) {
 #if defined(CONFIG_MXC_IPU_CSI_ENC) || defined(CONFIG_MXC_IPU_CSI_ENC_MODULE)
@@ -2367,6 +2355,7 @@ static long mxc_v4l_do_ioctl(struct file *file,
 
 	case VIDIOC_S_INPUT: {
 		int *index = arg;
+		//*index = 0; // brel test fix use prp_enc_select
 		pr_debug("   case VIDIOC_S_INPUT\n");
 		if (*index >= MXC_V4L2_CAPTURE_NUM_INPUTS) {
 			retval = -EINVAL;
