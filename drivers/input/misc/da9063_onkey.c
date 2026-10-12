@@ -166,13 +166,13 @@ static irqreturn_t da9063_onkey_irq_handler(int irq, void *data)
 		input_report_key(onkey->input, KEY_POWER, 1);
 		input_sync(onkey->input);
 		schedule_delayed_work(&onkey->work, 0);
-		dev_dbg(onkey->dev, "KEY_POWER long press.\n");
+		dev_dbg(onkey->dev, "KEY_POWER pressed.\n");
 	} else {
-		input_report_key(onkey->input, KEY_POWER, 1);
+		input_report_key(onkey->input, KEY_SLEEP, 1);
 		input_sync(onkey->input);
-		input_report_key(onkey->input, KEY_POWER, 0);
+		input_report_key(onkey->input, KEY_SLEEP, 0);
 		input_sync(onkey->input);
-		dev_dbg(onkey->dev, "KEY_POWER short press.\n");
+		dev_dbg(onkey->dev, "KEY_SLEEP pressed.\n");
 	}
 
 	return IRQ_HANDLED;
@@ -212,7 +212,10 @@ static int da9063_onkey_probe(struct platform_device *pdev)
 		 onkey->config->name);
 	onkey->input->phys = onkey->phys;
 
-	input_set_capability(onkey->input, EV_KEY, KEY_POWER);
+	if (onkey->key_power)
+		input_set_capability(onkey->input, EV_KEY, KEY_POWER);
+
+	input_set_capability(onkey->input, EV_KEY, KEY_SLEEP);
 
 	error = devm_delayed_work_autocancel(&pdev->dev, &onkey->work,
 					     da9063_poll_on);
@@ -220,8 +223,12 @@ static int da9063_onkey_probe(struct platform_device *pdev)
 		return error;
 
 	irq = platform_get_irq_byname(pdev, "ONKEY");
-	if (irq < 0)
-		return irq;
+	if (irq < 0) {
+		error = irq;
+		dev_err(&pdev->dev, "Failed to get platform IRQ: %d\n", error);
+		return error;
+	}
+	enable_irq_wake(irq);
 
 	error = devm_request_threaded_irq(&pdev->dev, irq,
 					  NULL, da9063_onkey_irq_handler,
@@ -243,6 +250,7 @@ static int da9063_onkey_probe(struct platform_device *pdev)
 	if (error)
 		return error;
 
+	platform_set_drvdata(pdev, onkey);
 	return 0;
 }
 
