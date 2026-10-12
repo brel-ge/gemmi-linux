@@ -2,6 +2,7 @@
 /*
  * Copyright 2011-2013 Freescale Semiconductor, Inc.
  * Copyright 2011 Linaro Ltd.
+ * Copyright (C) 2025, Digi International Inc.
  */
 
 #include <linux/clk.h>
