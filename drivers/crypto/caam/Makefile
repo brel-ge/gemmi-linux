@@ -30,11 +30,13 @@ caam_jr-$(CONFIG_CRYPTO_DEV_FSL_CAAM_SM) += sm_store.o
 obj-$(CONFIG_CRYPTO_DEV_FSL_CAAM_SM_TEST) += sm_test.o
 obj-$(CONFIG_CRYPTO_DEV_FSL_CAAM_SECVIO) += secvio.o
 obj-$(CONFIG_CRYPTO_DEV_FSL_CAAM_TK_API_TEST) += caamkeyblob_test.o
+obj-$(CONFIG_CRYPTO_DEV_FSL_CAAM_RNG_ERRATA) += caamrng_errata.o
 
 caam-$(CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI) += qi.o
 caam-$(CONFIG_DEBUG_FS) += debugfs.o
 
 obj-$(CONFIG_CRYPTO_DEV_FSL_DPAA2_CAAM) += dpaa2_caam.o
+obj-$(CONFIG_CRYPTO_DEV_FSL_CAAM_KEYBLOB) += caam_keyblob.o
 
 dpaa2_caam-y    := caamalg_qi2.o dpseci.o
 dpaa2_caam-$(CONFIG_DEBUG_FS) += dpseci-debugfs.o
