@@ -26,30 +26,42 @@ void v4l2_int_device_try_attach_all(void)
 	struct v4l2_int_device *m, *s;
 
 	list_for_each_entry(m, &int_list, head) {
-		if (m->type != v4l2_int_type_master)
+		if (m->type != v4l2_int_type_master) {
+		        pr_err("ERROR: v4l2_int_device type not master %s\n", m->name);
 			continue;
+		}
 
 		list_for_each_entry(s, &int_list, head) {
-			if (s->type != v4l2_int_type_slave)
+			if (s->type != v4l2_int_type_slave) {
+		                pr_err("ERROR: v4l2_int_device type not slave\n");
 				continue;
+			}
 
 			/* Slave is connected? */
-			if (s->u.slave->master)
+			if (s->u.slave->master) {
+		                pr_err("ERROR: v4l2_int_device slave is already connected\n");
 				continue;
+			}
 
 			/* Slave wants to attach to master? */
 			if (s->u.slave->attach_to[0] != 0
 			    && strncmp(m->name, s->u.slave->attach_to,
-				       V4L2NAMESIZE))
+				       V4L2NAMESIZE)){
+		                pr_err("ERROR: v4l2_int_device attach to wrong %s - %s\n"
+				       , m->name, s->u.slave->attach_to);
 				continue;
+			}
 
-			if (!try_module_get(m->module))
+			if (!try_module_get(m->module)){
+		                pr_err("ERROR: v4l2_int_device module not found\n");
 				continue;
+			}
 
 			s->u.slave->master = m;
 			if (m->u.master->attach(s)) {
 				s->u.slave->master = NULL;
 				module_put(m->module);
+		                pr_err("ERROR: v4l2_int_device attach failed\n");
 				continue;
 			}
 		}

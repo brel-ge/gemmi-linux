@@ -842,9 +842,6 @@ static int update_split_setting(struct ipu_task_entry *t, bool vdi_split)
 	u32 max_width;
 	int ret;
 
-	if (t->output.rotate >= IPU_ROTATE_90_RIGHT)
-		return IPU_CHECK_ERR_SPLIT_WITH_ROT;
-
 	iw = t->input.crop.w;
 	ih = t->input.crop.h;
 
