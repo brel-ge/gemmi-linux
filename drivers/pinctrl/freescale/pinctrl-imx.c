@@ -285,11 +285,34 @@ static int imx_pmx_set(struct pinctrl_dev *pctldev, unsigned selector,
 	return 0;
 }
 
+/*
+ * Gemmi quickfix: when a pin is requested as GPIO, set its mux mode to ALT5,
+ * which selects the GPIO function on i.MX6Q/DL/QP. Used to get the ECP5
+ * flash pins back to GPIO after updating the ECP5 configuration flash.
+ */
+static int imx_pmx_gpio_request_enable(struct pinctrl_dev *pctldev,
+				       struct pinctrl_gpio_range *range,
+				       unsigned int offset)
+{
+	struct imx_pinctrl *ipctl = pinctrl_dev_get_drvdata(pctldev);
+	const struct imx_pin_reg *pin_reg = &ipctl->pin_regs[offset];
+
+	if (!of_machine_is_compatible("fsl,imx6q") &&
+	    !of_machine_is_compatible("fsl,imx6dl"))
+		return 0;
+
+	if (pin_reg->mux_reg != -1)
+		writel(5, ipctl->base + pin_reg->mux_reg);
+
+	return 0;
+}
+
 struct pinmux_ops imx_pmx_ops = {
 	.get_functions_count = pinmux_generic_get_function_count,
 	.get_function_name = pinmux_generic_get_function_name,
 	.get_function_groups = pinmux_generic_get_function_groups,
 	.set_mux = imx_pmx_set,
+	.gpio_request_enable = imx_pmx_gpio_request_enable,
 };
 
 static int imx_pinconf_get_mmio(struct pinctrl_dev *pctldev, unsigned pin_id,
