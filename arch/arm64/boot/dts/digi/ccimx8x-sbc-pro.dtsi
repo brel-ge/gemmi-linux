@@ -992,6 +992,7 @@
 	bus-width = <4>;
 	no-1-8-v;
 	cd-gpios = <&lsio_gpio4 22 GPIO_ACTIVE_HIGH>;
+	fsl,cd-gpio-wakeup-disable;
 	status = "disabled";
 };
 
