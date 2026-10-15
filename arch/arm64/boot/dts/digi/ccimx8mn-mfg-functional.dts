@@ -120,7 +120,7 @@
 			ov5640_mipi_ep: endpoint {
 				remote-endpoint = <&mipi_csi0_ep>;
 				data-lanes = <1 2>;
-				clocks-lanes = <0>;
+				clock-lanes = <0>;
 			};
 		};
 	};
@@ -151,19 +151,16 @@
 };
 
 &mipi_csi {
-	#address-cells = <1>;
-	#size-cells = <0>;
 	status = "okay";
 
-	/* Camera 0  MIPI CSI-2 (CSIS0) */
-	port@0 {
-		reg = <0>;
-		mipi_csi0_ep: endpoint {
-			remote-endpoint = <&ov5640_mipi_ep>;
-			data-lanes = <2>;
-			csis-hs-settle = <13>;
-			csis-clk-settle = <2>;
-			csis-wclk;
+	ports {
+		port@0 {
+			mipi_csi0_ep: endpoint {
+				remote-endpoint = <&ov5640_mipi_ep>;
+				data-lanes = <1 2>;
+				csis-hs-settle = <13>;
+				csis-clk-settle = <2>;
+			};
 		};
 	};
 };

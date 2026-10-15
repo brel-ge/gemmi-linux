@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright 2026 Digi International Inc.
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/clock/imx8mm-clock.h>
+#include <dt-bindings/gpio/gpio.h>
+#include "../freescale/imx8mm-pinfunc.h"
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			overlay-description = "DVK: Digilent Pcam 5C MIPI camera";
+		};
+	};
+
+	/* Camera power control */
+	fragment@1 {
+		target = <&iomuxc>;
+		__overlay__ {
+			pinctrl_mipi: mipigrp {
+				fsl,pins = <
+					/* MIPI_CSI_RESET_N */
+					MX8MM_IOMUXC_GPIO1_IO12_GPIO1_IO12 0x19
+				>;
+			};
+		};
+	};
+
+	/* Camera sensor */
+	fragment@2 {
+		target = <&i2c2>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			ov5640_mipi: ov5640_mipi@3c {
+				compatible = "ovti,ov5640";
+				reg = <0x3c>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&pinctrl_mipi>;
+				clocks = <&clk IMX8MM_CLK_CLKO1>;
+				clock-names = "xclk";
+				assigned-clocks = <&clk IMX8MM_CLK_CLKO1>;
+				assigned-clock-parents = <&clk IMX8MM_CLK_24M>;
+				assigned-clock-rates = <24000000>;
+				powerdown-gpios = <&gpio1 12 GPIO_ACTIVE_LOW>;
+				status = "okay";
+
+				port {
+					ov5640_mipi_ep: endpoint {
+						remote-endpoint = <&mipi_csi0_ep>;
+						data-lanes = <1 2>;
+						clock-lanes = <0>;
+					};
+				};
+			};
+		};
+	};
+
+	/* Enable the CSI-2 receiver */
+	fragment@3 {
+		target = <&mipi_csi>;
+		__overlay__ {
+			status = "okay";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					mipi_csi0_ep: endpoint {
+						remote-endpoint = <&ov5640_mipi_ep>;
+						data-lanes = <1 2>;
+						csis-hs-settle = <13>;
+						csis-clk-settle = <2>;
+					};
+				};
+			};
+		};
+	};
+
+	/* Enable the CSI capture interface */
+	fragment@4 {
+		target = <&csi>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+};

@@ -56,12 +56,14 @@ ccimx93_dvk_overlays := ccimx9-dvk_mikroe-accel2-click.dtbo \
 ccimx8mm-dtbs :=	ccimx8mm-dvk.dtb \
 			$(ccimx8m_dvk_overlays) \
 			$(ccimx8m_som_overlays) \
+			ccimx8mm-dvk_pcam5c.dtbo \
 			ccimx8mm_cm4.dtbo
 
 ccimx8mn-dtbs :=	ccimx8mn-dvk.dtb \
 			$(ccimx8m_dvk_overlays) \
 			$(ccimx8m_som_overlays) \
 			ccimx8mn_cm7.dtbo \
+			ccimx8mn-dvk_pcam5c.dtbo \
 			ccimx8mn-dvk_v1-v2.dtbo \
 			ccimx8mn_v1.dtbo
 
