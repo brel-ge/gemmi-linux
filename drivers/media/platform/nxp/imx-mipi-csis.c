@@ -350,6 +350,8 @@ struct mipi_csis_device {
 	u32 clk_frequency;
 	u32 hs_settle;
 	u32 clk_settle;
+	u32 hs_settle_override;
+	u32 clk_settle_override;
 
 	spinlock_t slock;	/* Protect events */
 	struct mipi_csis_event events[MIPI_CSIS_NUM_EVENTS];
@@ -651,6 +653,10 @@ static int mipi_csis_calculate_params(struct mipi_csis_device *csis,
 	 */
 	csis->hs_settle = (lane_rate - 5000000) / 45000000;
 	csis->clk_settle = 0;
+	if (csis->hs_settle_override != UINT_MAX)
+		csis->hs_settle = csis->hs_settle_override;
+	if (csis->clk_settle_override != UINT_MAX)
+		csis->clk_settle = csis->clk_settle_override;
 
 	dev_dbg(csis->dev, "lane rate %u, Tclk_settle %u, Ths_settle %u\n",
 		lane_rate, csis->clk_settle, csis->hs_settle);
@@ -1372,6 +1378,20 @@ static int mipi_csis_async_register(struct mipi_csis_device *csis)
 	}
 
 	csis->bus = vep.bus.mipi_csi2;
+
+	/* Preserve board-specific D-PHY timings from the NXP receiver binding. */
+	csis->hs_settle_override = UINT_MAX;
+	csis->clk_settle_override = UINT_MAX;
+	if ((!fwnode_property_read_u32(ep, "csis-hs-settle",
+				       &csis->hs_settle_override) &&
+	     csis->hs_settle_override > 0xff) ||
+	    (!fwnode_property_read_u32(ep, "csis-clk-settle",
+				       &csis->clk_settle_override) &&
+	     csis->clk_settle_override > 3)) {
+		dev_err(csis->dev, "Invalid D-PHY settle time\n");
+		ret = -EINVAL;
+		goto err_parse;
+	}
 
 	dev_dbg(csis->dev, "data lanes: %d\n", csis->bus.num_data_lanes);
 	dev_dbg(csis->dev, "flags: 0x%08x\n", csis->bus.flags);

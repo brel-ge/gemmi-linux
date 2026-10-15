@@ -91,6 +91,16 @@ properties:
             unevaluatedProperties: false
 
             properties:
+              csis-hs-settle:
+                $ref: /schemas/types.yaml#/definitions/uint32
+                description: Board-specific D-PHY HSSETTLE register value.
+                maximum: 255
+
+              csis-clk-settle:
+                $ref: /schemas/types.yaml#/definitions/uint32
+                description: Board-specific D-PHY CLKSETTLE register value.
+                maximum: 3
+
               data-lanes:
                 description:
                   Note that 'fsl,imx7-mipi-csi2' only supports up to 2 data lines.
