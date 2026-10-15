@@ -524,6 +524,15 @@ static u32 ov5640_code_to_bpp(struct ov5640_dev *sensor, u32 code)
 	return format->bpp;
 }
 
+static bool ov5640_is_720p_yuv2lane(struct ov5640_dev *sensor)
+{
+	return ov5640_is_csi2(sensor) &&
+	       sensor->ep.bus.mipi_csi2.num_data_lanes == 2 &&
+	       sensor->current_mode->id == OV5640_MODE_720P_1280_720 &&
+	       (sensor->fmt.code == MEDIA_BUS_FMT_UYVY8_1X16 ||
+		sensor->fmt.code == MEDIA_BUS_FMT_YUYV8_1X16);
+}
+
 /*
  * FIXME: all of these register tables are likely filled with
  * entries that set the register to their power-on default values,
@@ -1471,7 +1480,8 @@ static int ov5640_set_mipi_pclk(struct ov5640_dev *sensor)
 	unsigned long sysclk;
 	u8 pclk_period;
 	u32 sample_rate;
-	u32 num_lanes;
+	u32 num_lanes = sensor->ep.bus.mipi_csi2.num_data_lanes;
+	u32 pll_lanes = ov5640_is_720p_yuv2lane(sensor) ? num_lanes : 1;
 	int ret;
 
 	/* Use the link freq computed at ov5640_update_pixel_rate() time. */
@@ -1483,12 +1493,12 @@ static int ov5640_set_mipi_pclk(struct ov5640_dev *sensor)
 	 * Higher link frequencies would make sysclk > 1GHz.
 	 * Keep the sysclk low and do not divide in the MIPI domain.
 	 */
-	if (link_freq > OV5640_LINK_RATE_MAX)
+	if (link_freq * pll_lanes > OV5640_LINK_RATE_MAX)
 		mipi_div = 1;
 	else
 		mipi_div = 2;
 
-	sysclk = link_freq * mipi_div;
+	sysclk = link_freq * pll_lanes * mipi_div;
 	ov5640_calc_sys_clk(sensor, sysclk, &prediv, &mult, &sysdiv);
 
 	/*
@@ -1528,7 +1538,6 @@ static int ov5640_set_mipi_pclk(struct ov5640_dev *sensor)
 	 *
 	 * 2 * sample_period = (mipi_clk * 2 * num_lanes / bpp) * (bpp / 8) / 2
 	 */
-	num_lanes = sensor->ep.bus.mipi_csi2.num_data_lanes;
 	sample_rate = (link_freq * mipi_div * num_lanes * 2) / 16;
 	pclk_period = 2000000000UL / sample_rate;
 
@@ -1716,7 +1725,9 @@ static int ov5640_set_timings(struct ov5640_dev *sensor,
 		return ret;
 
 	ret = ov5640_write_reg16(sensor, OV5640_REG_TIMING_VTS,
-				 mode->height + timings->vblank_def);
+				 mode->height +
+				 (ov5640_is_720p_yuv2lane(sensor) ?
+				  sensor->ctrls.vblank->val : timings->vblank_def));
 	if (ret < 0)
 		return ret;
 
@@ -2896,6 +2907,7 @@ static int ov5640_update_pixel_rate(struct ov5640_dev *sensor)
 	u32 pixel_rate;
 	s64 link_freq;
 	u32 num_lanes;
+	u32 pll_lanes = 1;
 	u32 vblank;
 	u32 bpp;
 
@@ -2913,19 +2925,25 @@ static int ov5640_update_pixel_rate(struct ov5640_dev *sensor)
 		return 0;
 	}
 
-	/*
-	 * The MIPI CSI-2 link frequency should comply with the CSI-2
-	 * specification and be lower than 1GHz.
-	 *
-	 * Start from the suggested pixel_rate for the current mode and
-	 * progressively slow it down if it exceeds 1GHz.
-	 */
 	num_lanes = sensor->ep.bus.mipi_csi2.num_data_lanes;
 	bpp = ov5640_code_to_bpp(sensor, fmt->code);
+
+	/*
+	 * Two-lane 720p YUV needs the aggregate lane rate for the PLL.
+	 * Use a 768MHz PLL (48Mpixels/s) instead of pushing the ISP close
+	 * to 1GHz, where YUV output exhibits line and colour artefacts.
+	 * Keep the existing clock profiles for other modes and formats.
+	 */
+	if (ov5640_is_720p_yuv2lane(sensor)) {
+		pixel_rate_id = OV5640_PIXEL_RATE_96M;
+		pll_lanes = num_lanes;
+	}
+
+	/* Slow down the profile if the required PLL would exceed 1GHz. */
 	do {
 		pixel_rate = ov5640_pixel_rates[pixel_rate_id];
 		link_freq = pixel_rate * bpp / (2 * num_lanes);
-	} while (link_freq >= 1000000000U &&
+	} while (link_freq * pll_lanes >= 1000000000U &&
 		 ++pixel_rate_id < OV5640_NUM_PIXEL_RATES);
 
 	sensor->current_link_freq = link_freq;
@@ -2938,7 +2956,7 @@ static int ov5640_update_pixel_rate(struct ov5640_dev *sensor)
 	 * Adjust the pixel rate and link frequency control value to report it
 	 * correctly to userspace.
 	 */
-	if (link_freq > OV5640_LINK_RATE_MAX) {
+	if (link_freq * pll_lanes > OV5640_LINK_RATE_MAX) {
 		pixel_rate /= 2;
 		link_freq /= 2;
 	}
@@ -2957,6 +2975,10 @@ static int ov5640_update_pixel_rate(struct ov5640_dev *sensor)
 				 hblank, hblank, 1, hblank);
 
 	vblank = timings->vblank_def;
+	if (ov5640_is_720p_yuv2lane(sensor))
+		vblank = DIV_ROUND_CLOSEST(pixel_rate,
+					 timings->htot * ov5640_framerates[sensor->current_fr]) -
+			 mode->height;
 	__v4l2_ctrl_vblank_update(sensor, vblank);
 
 	exposure_max = timings->crop.height + vblank - 4;
