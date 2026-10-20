@@ -90,6 +90,7 @@ ccimx95_dvk_overlays := ccimx95-dvk_expi-os08a20-cam.dtbo \
 			ccimx95-dvk_lvds0-g101evn010.dtbo \
 			ccimx95-dvk_lvds1-g101evn010.dtbo \
 			ccimx95-dvk_pcam5c.dtbo \
+			ccimx95-dvk_pcie.dtbo \
 			ccimx95-dvk_v2.dtbo
 
 ccimx95-dtbs := 	ccimx95-dvk.dtb \

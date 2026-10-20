@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright 2026 Digi International Inc.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			overlay-description = "DVK: PCIe on M.2 slots";
+		};
+	};
+
+	fragment@1 {
+		target = <&pcie0>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@2 {
+		target = <&pcie1>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+};
