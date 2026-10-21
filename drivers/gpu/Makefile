@@ -3,7 +3,9 @@
 # taken to initialize them in the correct order. Link order is the only way
 # to ensure this currently.
 obj-y			+= arm/
-obj-y			+= host1x/ drm/ vga/
+# Similarly, buddy must come first since it is used by other drivers.
+obj-$(CONFIG_GPU_BUDDY)	+= buddy.o
+obj-y			+= host1x/ drm/ vga/ tests/
 obj-y			+= imx/
 obj-$(CONFIG_TRACE_GPU_MEM)		+= trace/
 obj-$(CONFIG_NOVA_CORE)		+= nova-core/
