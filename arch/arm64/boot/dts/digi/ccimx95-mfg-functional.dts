@@ -258,6 +258,10 @@
 	};
 };
 
+&scmi_vdd_sdio2 {
+	regulator-always-on;
+};
+
 &usb2 {
 	vbus-supply = <&reg_5v_in>;
 	dr_mode = "host";
