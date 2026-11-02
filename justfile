@@ -53,4 +53,6 @@ install_modules:
   depmod -b .modules-install `cat include/config/kernel.release`
   rm -f .modules-install/lib/modules/*/build
   sudo rm -rf /exports/gemmi-image-dev/lib/modules/`cat include/config/kernel.release`
-  sudo cp -a --no-preserve=ownership .modules-install/. /exports/gemmi-image-dev/
+  # copy into lib/modules, as lib is a symlink to usr/lib in usrmerge rootfs
+  sudo mkdir -p /exports/gemmi-image-dev/lib/modules
+  sudo cp -a --no-preserve=ownership .modules-install/lib/modules/. /exports/gemmi-image-dev/lib/modules/
