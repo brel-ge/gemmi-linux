@@ -14,8 +14,9 @@ build:
   {{ DOCKER_RUN }} just docker_build
 
 
+# gemmi-nfs.config adds Ethernet and NFS root for TFTP/NFS boot
 docker_configure_gemmi:
-  {{ YOCTO_ENV }} make gemmi_defconfig 
+  {{ YOCTO_ENV }} make gemmi_defconfig gemmi-nfs.config
 
 configure_gemmi:
   {{ DOCKER_RUN }} just docker_configure_gemmi
