@@ -92,6 +92,10 @@
 		regulator-max-microvolt = <3300000>;
 		gpio = <&gpio2 25 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
+		/* sgtl5000 probe reads the chip id 1us after enabling the
+		 * supply, the FET switched rail needs time to ramp up
+		 */
+		startup-delay-us = <10000>;
 		vin-supply = <&bperi>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_aud_pwr_en>;
