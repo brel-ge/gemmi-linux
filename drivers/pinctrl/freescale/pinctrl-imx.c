@@ -298,6 +298,7 @@ static int imx_pmx_gpio_request_enable(struct pinctrl_dev *pctldev,
 	const struct imx_pin_reg *pin_reg = &ipctl->pin_regs[offset];
 
 	if (!of_machine_is_compatible("fsl,imx6q") &&
+	    !of_machine_is_compatible("fsl,imx6qp") &&
 	    !of_machine_is_compatible("fsl,imx6dl"))
 		return 0;
 
