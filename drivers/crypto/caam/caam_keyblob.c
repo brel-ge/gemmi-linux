@@ -319,6 +319,7 @@ int blob_decap_jobdesc(u32 **desc, dma_addr_t keymod, dma_addr_t blobbuf,
 	*desc = tdesc;
 	return dsize;
 }
+EXPORT_SYMBOL_GPL(blob_decap_jobdesc);
 
 
 
