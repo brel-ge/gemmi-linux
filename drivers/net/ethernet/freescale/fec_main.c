@@ -5524,7 +5524,8 @@ failed_mii_init:
 failed_irq:
 	fec_enet_deinit(ndev);
 failed_init:
-	fec_ptp_stop(pdev);
+	if (fep->bufdesc_ex)
+		fec_ptp_stop(pdev);
 	if (fep->reg_mdio)
 		regulator_disable(fep->reg_mdio);
 failed_reset:
@@ -5569,7 +5570,8 @@ fec_drv_remove(struct platform_device *pdev)
 			ERR_PTR(ret));
 
 	cancel_work_sync(&fep->tx_timeout_work);
-	fec_ptp_stop(pdev);
+	if (fep->bufdesc_ex)
+		fec_ptp_stop(pdev);
 	unregister_netdev(ndev);
 	fec_enet_mii_remove(fep);
 	if (fep->reg_phy)
@@ -5679,6 +5681,7 @@ static int fec_resume(struct device *dev)
 		if (fep->rpm_active)
 			pm_runtime_force_resume(dev);
 
+		pinctrl_pm_select_default_state(&fep->pdev->dev);
 		ret = fec_enet_clk_enable(ndev, true);
 		if (ret) {
 			rtnl_unlock();
@@ -5696,7 +5699,6 @@ static int fec_resume(struct device *dev)
 			writel(val, fep->hwp + FEC_ECNTRL);
 			fep->wol_flag &= ~FEC_WOL_FLAG_SLEEP_ON;
 		} else {
-			pinctrl_pm_select_default_state(&fep->pdev->dev);
 			if (fep->phy_reset_in_suspend)
 				gpiod_set_value_cansleep(fep->phy_reset, 0);
 		}

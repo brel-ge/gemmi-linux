@@ -1154,8 +1154,14 @@ iwl_mld_link_info_changed_ap_ibss(struct iwl_mld *mld,
 	if (link_changes)
 		iwl_mld_change_link_in_fw(mld, link, link_changes);
 
-	if (changes & BSS_CHANGED_BEACON)
+	if (changes & BSS_CHANGED_BEACON) {
+		WARN_ON(!link->enable_beacon);
 		iwl_mld_update_beacon_template(mld, vif, link);
+	}
+
+	/* Enabling beacons was already covered above */
+	if ((changes & BSS_CHANGED_BEACON_ENABLED) && !link->enable_beacon)
+		iwl_mld_stop_beacon(mld, vif, link);
 }
 
 static
@@ -1686,6 +1692,16 @@ static int iwl_mld_move_sta_state_up(struct iwl_mld *mld,
 
 		if (vif->type == NL80211_IFTYPE_STATION)
 			iwl_mld_link_set_2mhz_block(mld, vif, sta);
+
+		if (sta->tdls) {
+			/*
+			 * update MAC since wifi generation flags may change,
+			 * we also update MAC on association to the AP via the
+			 * vif assoc change
+			 */
+			iwl_mld_mac_fw_action(mld, vif, FW_CTXT_ACTION_MODIFY);
+		}
+
 		/* Now the link_sta's capabilities are set, update the FW */
 		iwl_mld_config_tlc(mld, vif, sta);
 
@@ -1794,6 +1810,15 @@ static int iwl_mld_move_sta_state_down(struct iwl_mld *mld,
 		if (sta->tdls && iwl_mld_tdls_sta_count(mld) == 0) {
 			/* just removed last TDLS STA, so enable PM */
 			iwl_mld_update_mac_power(mld, vif, false);
+		}
+
+		if (sta->tdls) {
+			/*
+			 * update MAC since wifi generation flags may change,
+			 * we also update MAC on disassociation to the AP via
+			 * the vif assoc change
+			 */
+			iwl_mld_mac_fw_action(mld, vif, FW_CTXT_ACTION_MODIFY);
 		}
 	} else {
 		return -EINVAL;
@@ -2139,7 +2164,9 @@ static void iwl_mld_set_key_remove(struct iwl_mld *mld,
 	}
 
 	/* if this key was stored to be added later to the FW - free it here */
-	if (!(key->flags & IEEE80211_KEY_FLAG_PAIRWISE))
+	if (!(key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
+	    (vif->type == NL80211_IFTYPE_AP ||
+	     vif->type == NL80211_IFTYPE_ADHOC))
 		iwl_mld_free_ap_early_key(mld, key, mld_vif);
 
 	/* We already removed it */

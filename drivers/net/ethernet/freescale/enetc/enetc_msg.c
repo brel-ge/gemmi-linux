@@ -86,6 +86,7 @@ static u16 enetc_msg_pf_set_vf_mac_hash_filter(struct enetc_pf *pf, int vf_id)
 	struct enetc_msg_mac_hash_filter *msg;
 	struct enetc_hw *hw = &pf->si->hw;
 	int si_id = vf_id + 1;
+	u64 uc_hash, mc_hash;
 
 	if (is_enetc_rev1(pf->si))
 		return ENETC_MSG_CODE_NOT_SUPPORT;
@@ -99,12 +100,16 @@ static u16 enetc_msg_pf_set_vf_mac_hash_filter(struct enetc_pf *pf, int vf_id)
 		return ENETC_MSG_CODE_NOT_SUPPORT;
 
 	if (msg->type == ENETC_MAC_FILTER_TYPE_UC) {
-		pf->ops->set_si_mac_hash_filter(hw, si_id, UC, msg->hash_tbl[0]);
+		uc_hash = (u64)msg->hash_tbl[1] << 32 | msg->hash_tbl[0];
+		pf->ops->set_si_mac_hash_filter(hw, si_id, UC, uc_hash);
 	} else if (msg->type == ENETC_MAC_FILTER_TYPE_MC) {
-		pf->ops->set_si_mac_hash_filter(hw, si_id, MC, msg->hash_tbl[0]);
+		mc_hash = (u64)msg->hash_tbl[1] << 32 | msg->hash_tbl[0];
+		pf->ops->set_si_mac_hash_filter(hw, si_id, MC, mc_hash);
 	} else {
-		pf->ops->set_si_mac_hash_filter(hw, si_id, UC, msg->hash_tbl[0]);
-		pf->ops->set_si_mac_hash_filter(hw, si_id, MC, msg->hash_tbl[1]);
+		uc_hash = (u64)msg->hash_tbl[1] << 32 | msg->hash_tbl[0];
+		pf->ops->set_si_mac_hash_filter(hw, si_id, UC, uc_hash);
+		mc_hash = (u64)msg->hash_tbl[3] << 32 | msg->hash_tbl[2];
+		pf->ops->set_si_mac_hash_filter(hw, si_id, MC, mc_hash);
 	}
 
 	return ENETC_MSG_CODE_SUCCESS;
@@ -113,12 +118,12 @@ static u16 enetc_msg_pf_set_vf_mac_hash_filter(struct enetc_pf *pf, int vf_id)
 static u16 enetc_msg_pf_set_vf_mac_promisc_mode(struct enetc_pf *pf, int vf_id)
 {
 	struct enetc_msg_swbd *msg_swbd = &pf->rxmsg[vf_id];
-	struct enetc_msg_mac_promsic_mode *msg;
+	struct enetc_msg_mac_promisc_mode *msg;
 	struct enetc_hw *hw = &pf->si->hw;
 	bool promisc_mode = false;
 	int si_id = vf_id + 1;
 
-	msg = (struct enetc_msg_mac_promsic_mode *)msg_swbd->vaddr;
+	msg = (struct enetc_msg_mac_promisc_mode *)msg_swbd->vaddr;
 	if (msg->promisc_mode == ENETC_MAC_PROMISC_MODE_ENABLE) {
 		if (!enetc_pf_is_vf_trusted(pf, vf_id))
 			return ENETC_MSG_CODE_PERMISSION_DENY;
@@ -194,13 +199,15 @@ static u16 enetc_msg_pf_set_vf_vlan_hash_filter(struct enetc_pf *pf, int vf_id)
 	struct enetc_msg_swbd *msg_swbd = &pf->rxmsg[vf_id];
 	struct enetc_msg_vlan_hash_filter *msg;
 	int si_id = vf_id + 1;
+	u64 hash;
 
 	msg = (struct enetc_msg_vlan_hash_filter *)msg_swbd->vaddr;
 	/* Currently, hardware only supports 64 bits table size */
 	if (msg->size != ENETC_VLAN_HASH_TABLE_SIZE_64)
 		return ENETC_MSG_CODE_NOT_SUPPORT;
 
-	pf->ops->set_si_vlan_hash_filter(pf->si, si_id, msg->hash_tbl[0]);
+	hash = (u64)msg->hash_tbl[1] << 32 | msg->hash_tbl[0];
+	pf->ops->set_si_vlan_hash_filter(pf->si, si_id, hash);
 
 	return ENETC_MSG_CODE_SUCCESS;
 }
@@ -208,12 +215,12 @@ static u16 enetc_msg_pf_set_vf_vlan_hash_filter(struct enetc_pf *pf, int vf_id)
 static u16 enetc_msg_pf_set_vf_vlan_promisc_mode(struct enetc_pf *pf, int vf_id)
 {
 	struct enetc_msg_swbd *msg_swbd = &pf->rxmsg[vf_id];
-	struct enetc_msg_vlan_promsic_mode *msg;
+	struct enetc_msg_vlan_promisc_mode *msg;
 	struct enetc_si *si = pf->si;
 	bool promisc_mode = false;
 	int si_id = vf_id + 1;
 
-	msg = (struct enetc_msg_vlan_promsic_mode *)msg_swbd->vaddr;
+	msg = (struct enetc_msg_vlan_promisc_mode *)msg_swbd->vaddr;
 	if (msg->promisc_mode == ENETC_VLAN_PROMISC_MODE_ENABLE)
 		promisc_mode = true;
 
@@ -240,13 +247,13 @@ static u16 enetc_msg_handle_vlan_filter(struct enetc_msg_header *msg_hdr,
 static u16 enetc_msg_pf_reply_link_status(struct enetc_pf *pf)
 {
 	struct net_device *ndev = pf->si->ndev;
+	struct enetc_ndev_priv *priv;
 	union enetc_pf_msg pf_msg;
 
+	priv = netdev_priv(ndev);
 	pf_msg.class_id = ENETC_MSG_CLASS_ID_LINK_STATUS;
-	if (netif_carrier_ok(ndev))
-		pf_msg.class_code = ENETC_PF_NC_LINK_STATUS_UP;
-	else
-		pf_msg.class_code = ENETC_PF_NC_LINK_STATUS_DOWN;
+	pf_msg.class_code_u8 = enetc_build_link_status(priv,
+						       netif_carrier_ok(ndev));
 
 	return pf_msg.code;
 }
@@ -277,16 +284,16 @@ static void enetc_send_link_status_msg(struct enetc_pf *pf, u16 ms_mask)
 	struct device *dev = &pf->si->pdev->dev;
 	struct net_device *ndev = pf->si->ndev;
 	union enetc_pf_msg pf_msg = {};
+	struct enetc_ndev_priv *priv;
 	int err;
 
 	if (!ms_mask)
 		return;
 
+	priv = netdev_priv(ndev);
 	pf_msg.class_id = ENETC_MSG_CLASS_ID_LINK_STATUS;
-	if (netif_carrier_ok(ndev))
-		pf_msg.class_code = ENETC_PF_NC_LINK_STATUS_UP;
-	else
-		pf_msg.class_code = ENETC_PF_NC_LINK_STATUS_DOWN;
+	pf_msg.class_code_u8 = enetc_build_link_status(priv,
+						       netif_carrier_ok(ndev));
 
 	err = enetc_pf_send_msg(pf, pf_msg.code, ms_mask);
 	if (err)
@@ -328,11 +335,26 @@ static u16 enetc_msg_handle_link_status(struct enetc_msg_header *msg_hdr,
 	}
 }
 
+static u32 enetc_msg_get_speed_code(u32 link_speed)
+{
+	u32 speed;
+
+	if (link_speed < SPEED_5000)
+		return ENETC_MSG_SPEED_UNKNOWN;
+
+	speed = (link_speed - SPEED_5000) / 1000 + ENETC_MSG_SPEED_5G;
+	if (speed > ENETC_MSG_SPEED_MAX)
+		return ENETC_MSG_SPEED_UNKNOWN;
+
+	return speed;
+}
+
 static u16 enetc_msg_pf_reply_link_speed(struct enetc_pf *pf)
 {
 	struct enetc_ndev_priv *priv = netdev_priv(pf->si->ndev);
 	struct ethtool_link_ksettings link_info = {};
 	union enetc_pf_msg pf_msg = {};
+	u8 speed_code;
 
 	rtnl_lock();
 	if (!priv->phylink ||
@@ -348,40 +370,30 @@ static u16 enetc_msg_pf_reply_link_speed(struct enetc_pf *pf)
 	switch (link_info.base.speed) {
 	case SPEED_10:
 		if (link_info.base.duplex == DUPLEX_HALF)
-			pf_msg.class_code = ENETC_MSG_SPEED_10M_HD;
+			speed_code = ENETC_MSG_SPEED_10M_HD;
 		else
-			pf_msg.class_code = ENETC_MSG_SPEED_10M_FD;
+			speed_code = ENETC_MSG_SPEED_10M_FD;
 		break;
 	case SPEED_100:
 		if (link_info.base.duplex == DUPLEX_HALF)
-			pf_msg.class_code = ENETC_MSG_SPEED_100M_HD;
+			speed_code = ENETC_MSG_SPEED_100M_HD;
 		else
-			pf_msg.class_code = ENETC_MSG_SPEED_100M_FD;
+			speed_code = ENETC_MSG_SPEED_100M_FD;
 		break;
 	case SPEED_1000:
-		pf_msg.class_code = ENETC_MSG_SPEED_1000M;
+		speed_code = ENETC_MSG_SPEED_1000M;
 		break;
 	case SPEED_2500:
-		pf_msg.class_code = ENETC_MSG_SPEED_2500M;
+		speed_code = ENETC_MSG_SPEED_2500M;
 		break;
 	case SPEED_5000:
-		pf_msg.class_code = ENETC_MSG_SPEED_5G;
-		break;
-	case SPEED_10000:
-		pf_msg.class_code = ENETC_MSG_SPEED_10G;
-		break;
-	case SPEED_25000:
-		pf_msg.class_code = ENETC_MSG_SPEED_25G;
-		break;
-	case SPEED_50000:
-		pf_msg.class_code = ENETC_MSG_SPEED_50G;
-		break;
-	case SPEED_100000:
-		pf_msg.class_code = ENETC_MSG_SPEED_100G;
+		speed_code = ENETC_MSG_SPEED_5G;
 		break;
 	default:
-		pf_msg.class_code = ENETC_MSG_SPEED_UNKNOWN;
+		speed_code = enetc_msg_get_speed_code(link_info.base.speed);
 	}
+
+	pf_msg.class_code_u8 = speed_code;
 
 	return pf_msg.code;
 }

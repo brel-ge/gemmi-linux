@@ -150,8 +150,8 @@ static const struct snd_soc_dapm_route audio_map[] = {
 	{"Playback",  NULL, "CPU-Playback"},
 	{"CPU-Capture",  NULL, "Capture"},
 	/* 2nd half -- ASRC DAPM routes */
-	{"CPU-Playback",  NULL, "ASRC-Playback"},
-	{"ASRC-Capture",  NULL, "CPU-Capture"},
+	{"CPU-Playback",  NULL, "ASRCA-Playback"},
+	{"ASRCA-Capture",  NULL, "CPU-Capture"},
 };
 
 static const struct snd_soc_dapm_route audio_map_ac97[] = {
@@ -159,22 +159,22 @@ static const struct snd_soc_dapm_route audio_map_ac97[] = {
 	{"AC97 Playback",  NULL, "CPU AC97 Playback"},
 	{"CPU AC97 Capture",  NULL, "AC97 Capture"},
 	/* 2nd half -- ASRC DAPM routes */
-	{"CPU AC97 Playback",  NULL, "ASRC-Playback"},
-	{"ASRC-Capture",  NULL, "CPU AC97 Capture"},
+	{"CPU AC97 Playback",  NULL, "ASRCA-Playback"},
+	{"ASRCA-Capture",  NULL, "CPU AC97 Capture"},
 };
 
 static const struct snd_soc_dapm_route audio_map_tx[] = {
 	/* 1st half -- Normal DAPM routes */
 	{"Playback",  NULL, "CPU-Playback"},
 	/* 2nd half -- ASRC DAPM routes */
-	{"CPU-Playback",  NULL, "ASRC-Playback"},
+	{"CPU-Playback",  NULL, "ASRCA-Playback"},
 };
 
 static const struct snd_soc_dapm_route audio_map_rx[] = {
 	/* 1st half -- Normal DAPM routes */
 	{"CPU-Capture",  NULL, "Capture"},
 	/* 2nd half -- ASRC DAPM routes */
-	{"ASRC-Capture",  NULL, "CPU-Capture"},
+	{"ASRCA-Capture",  NULL, "CPU-Capture"},
 };
 
 static const struct snd_soc_dapm_route audio_map_esai[] = {
@@ -815,8 +815,8 @@ static int fsl_asoc_card_probe(struct platform_device *pdev)
 
 	cpu_pdev = of_find_device_by_node(cpu_np);
 	if (!cpu_pdev) {
-		dev_err(&pdev->dev, "failed to find CPU DAI device\n");
-		ret = -EINVAL;
+		ret = dev_err_probe(&pdev->dev, -EPROBE_DEFER,
+				    "failed to find CPU DAI device\n");
 		goto fail;
 	}
 
@@ -906,6 +906,7 @@ static int fsl_asoc_card_probe(struct platform_device *pdev)
 	for (codec_idx = 0; codec_idx < 2; codec_idx++) {
 		priv->codec_priv[codec_idx].fll_id = -1;
 		priv->codec_priv[codec_idx].pll_id = -1;
+		priv->codec_priv[codec_idx].pll_ratio_s24 = 384;
 	}
 
 	/* Diversify the card configurations */

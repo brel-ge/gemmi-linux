@@ -6,7 +6,13 @@
 /dts-v1/;
 /plugin/;
 
+#include "imx95-clock.h"
 #include "imx95-lt9611uxc-common.dtsi"
+
+&dpu {
+	assigned-clocks = <&scmi_clk IMX95_CLK_DISP1PIX>;
+	assigned-clock-parents = <&scmi_clk IMX95_CLK_VIDEOPLL1>;
+};
 
 &lpi2c3 {
 	#address-cells = <1>;

@@ -139,7 +139,7 @@ static int neutron_inference_run(struct neutron_inference *inf)
 	 * Otherwise it means neutron is stuck.
 	 */
 	val = ndev->mbox->ops->read_ret(ndev->mbox);
-	if (unlikely(val != RESET_VAL)) {
+	if (unlikely(!(val == RESET_VAL || val == RESET_VAL_OLD))) {
 		dev_dbg(ndev->dev, "reset neutron: 0x%x\n", val);
 		mutex_lock(&ndev->mutex);
 		neutron_hw_reset(ndev);
@@ -288,6 +288,12 @@ static void inference_done_callback(struct work_struct *work)
 
 	pm_runtime_get_sync(ndev->dev);
 
+	/* Snapshot the firmware reply into inf before send_reset clobbers
+	 * MBOX0..MBOX2 with RESET_VAL. Userspace reads these via
+	 * NEUTRON_IOCTL_INFERENCE_STATE long after the registers are gone.
+	 */
+	mbox->ops->recv_data(mbox, &inf->fw_rx);
+
 	/* Sync the output data for cpu after inference is done */
 	neutron_memory_sync(ndev, inf->buf->dma_addr + inf->args.output_offset,
 			    inf->args.output_size, DMA_FROM_DEVICE);
@@ -388,7 +394,6 @@ static long neutron_inference_ioctl(struct file *file,
 	struct neutron_device *ndev;
 	int ret = -EINVAL;
 	struct neutron_uapi_result_status uapi;
-	struct neutron_mbox_rx_msg rx_msg;
 
 	if (!inf || IS_ERR(inf))
 		return ret;
@@ -403,11 +408,9 @@ static long neutron_inference_ioctl(struct file *file,
 		uapi.status = inf->status;
 		uapi.error_code = 0;
 
-		/* Read firmware return code if the job is done */
-		if (inf->status == NEUTRON_UAPI_STATUS_DONE) {
-			ndev->mbox->ops->recv_data(ndev->mbox, &rx_msg);
-			uapi.error_code = rx_msg.args[0];
-		}
+		/* Serve the cached firmware reply */
+		if (inf->status == NEUTRON_UAPI_STATUS_DONE)
+			uapi.error_code = inf->fw_rx.args[0];
 
 		if (copy_to_user(udata, &uapi, sizeof(uapi)))
 			break;

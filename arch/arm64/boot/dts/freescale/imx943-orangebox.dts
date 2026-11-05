@@ -292,9 +292,9 @@
 			no-map;
 		};
 
-		prime_reserved: prime-reserved@240000000 {
+		prime_reserved: prime-reserved@170000000 {
 			compatible = "shared-dma-pool";
-			reg = <0x00000002 0x40000000 0x00000000 0x40000000>;
+			reg = <0x00000001 0x70000000 0x00000000 0x10000000>;
 			no-map;
 		};
 	};
@@ -486,7 +486,7 @@
 	status = "okay";
 
 	fxls8967af: accelerometer@19 {
-		compatible = "nxp,fxls8967af";
+		compatible = "nxp,fxls8967af","nxp,fxls8962af";
 		reg = <0x19>;
 		interrupt-parent = <&gpio5>;
 		interrupts = <0 IRQ_TYPE_LEVEL_HIGH>;

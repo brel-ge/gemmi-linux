@@ -41,13 +41,13 @@ struct virtqueue {
 	void *priv;
 };
 
-struct vduse_iova_domain;
+struct vduse_vq_group;
 
 union virtio_map {
 	/* Device that performs DMA */
 	struct device *dma_dev;
-	/* VDUSE specific mapping data */
-	struct vduse_iova_domain *iova_domain;
+	/* VDUSE specific virtqueue group for doing map */
+	struct vduse_vq_group *group;
 };
 
 int virtqueue_add_outbuf(struct virtqueue *vq,
@@ -83,6 +83,13 @@ int virtqueue_add_sgs(struct virtqueue *vq,
 		      unsigned int in_sgs,
 		      void *data,
 		      gfp_t gfp);
+
+int virtqueue_add_sgs_premapped(struct virtqueue *vq,
+				struct scatterlist *sgs[],
+				unsigned int out_sgs,
+				unsigned int in_sgs,
+				void *data,
+				gfp_t gfp);
 
 struct device *virtqueue_dma_dev(struct virtqueue *vq);
 
@@ -204,6 +211,7 @@ int virtio_device_freeze(struct virtio_device *dev);
 int virtio_device_restore(struct virtio_device *dev);
 #endif
 void virtio_reset_device(struct virtio_device *dev);
+void virtio_device_shutdown(struct virtio_device *dev);
 int virtio_device_reset_prepare(struct virtio_device *dev);
 int virtio_device_reset_done(struct virtio_device *dev);
 

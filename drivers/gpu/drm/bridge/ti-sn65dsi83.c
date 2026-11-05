@@ -408,7 +408,7 @@ retry:
 	drm_modeset_drop_locks(&ctx);
 	drm_modeset_acquire_fini(&ctx);
 
-	return 0;
+	return err;
 }
 
 static void sn65dsi83_reset_work(struct work_struct *ws)
@@ -422,6 +422,7 @@ static void sn65dsi83_reset_work(struct work_struct *ws)
 		dev_err(ctx->dev, "reset pipe failed %pe\n", ERR_PTR(ret));
 		return;
 	}
+
 	if (ctx->irq)
 		enable_irq(ctx->irq);
 }

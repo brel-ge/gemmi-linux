@@ -134,6 +134,8 @@ static void wave6_vpu_dec_release_fb(struct vpu_instance *inst)
 {
 	int i;
 
+	guard(mutex)(&inst->fbc_lock);
+
 	inst->allocated_fb_num = 0;
 	inst->registered_fb_num = 0;
 	for (i = 0; i < WAVE6_MAX_FBS; i++) {
@@ -154,6 +156,8 @@ static void wave6_vpu_dec_destroy_instance(struct vpu_instance *inst)
 	dprintk(inst->dev->dev, "[%d] destroy instance\n", inst->id);
 	wave6_vpu_remove_dbgfs_file(inst);
 
+	cancel_work_sync(&inst->fb_work);
+
 	ret = wave6_vpu_dec_close(inst, &fail_res);
 	if (ret) {
 		dev_err(inst->dev->dev, "failed destroy instance: %d (%d)\n",
@@ -163,8 +167,7 @@ static void wave6_vpu_dec_destroy_instance(struct vpu_instance *inst)
 	spin_lock(&inst->dev->inst_lock);
 	list_del_init(&inst->list);
 	spin_unlock(&inst->dev->inst_lock);
-	scoped_guard(mutex, &inst->fbc_lock)
-		wave6_vpu_dec_release_fb(inst);
+	wave6_vpu_dec_release_fb(inst);
 	wave6_vpu_set_instance_state(inst, VPU_INST_STATE_NONE);
 
 	if (!pm_runtime_suspended(inst->dev->dev))
@@ -193,8 +196,7 @@ static void wave6_handle_bitstream_buffer(struct vpu_instance *inst)
 		wave6_vpu_dec_set_rd_ptr(inst, rd_ptr, true);
 
 		src_size = vb2_get_plane_payload(&src_buf->vb2_buf, 0);
-		wave6_vpu_force_dma_sync_single_for_device(inst->dev, rd_ptr, src_size,
-							   DMA_BIDIRECTIONAL);
+		wave6_vpu_force_dma_sync_for_device(inst, src_buf, DMA_TO_DEVICE);
 	}
 
 	if (!src_size) {
@@ -297,7 +299,7 @@ static int wave6_allocate_aux_buffer(struct vpu_instance *inst,
 	inst->aux_vbuf[type][idx].label = wave6_vpu_get_aux_name(type);
 	ret = wave6_alloc_dma(inst->dev->dev, &inst->aux_vbuf[type][idx]);
 	if (ret) {
-		dev_dbg(inst->dev->dev, "%s: Alloc fail (type %d)\n", __func__, type);
+		dev_err(inst->dev->dev, "%s: Alloc fail (type %d)\n", __func__, type);
 		return ret;
 	}
 
@@ -311,25 +313,39 @@ static int wave6_allocate_aux_buffer(struct vpu_instance *inst,
 
 	ret = wave6_vpu_dec_register_aux_buffer(inst, buf_info);
 	if (ret) {
-		dev_dbg(inst->dev->dev, "%s: Register fail (type %d)\n", __func__, type);
+		dev_err(inst->dev->dev, "%s: Register fail (type %d)\n", __func__, type);
 		return ret;
 	}
 
 	return 0;
 }
 
-static void wave6_allocate_internal_buffers(struct vpu_instance *inst)
+static bool wave6_allocate_internal_buffer(struct vpu_instance *inst)
 {
-	struct dec_info *p_dec_info = &inst->codec_info->dec_info;
-	unsigned int fb_num = p_dec_info->initial_info.min_frame_buffer_count;
-	int ret, idx;
+	struct dec_info *p_dec_info;
+	unsigned int fb_num;
+	int ret = 0;
+	int idx;
 
 	guard(mutex)(&inst->fbc_lock);
 
-	if (inst->allocated_fb_num >= fb_num)
-		return;
+	if (!inst->codec_info)
+		return false;
 
-	idx = inst->allocated_fb_num++;
+	p_dec_info = &inst->codec_info->dec_info;
+	fb_num = p_dec_info->initial_info.min_frame_buffer_count;
+
+	if (inst->allocated_fb_num >= fb_num)
+		return false;
+
+	idx = inst->allocated_fb_num;
+
+	if (idx >= WAVE6_MAX_FBS) {
+		dev_err(inst->dev->dev,
+			"fb index %d reaches max %u, stop allocating\n",
+			idx, WAVE6_MAX_FBS);
+		return false;
+	}
 
 	ret = wave6_allocate_fbc_buffer(inst, idx);
 	if (ret)
@@ -347,10 +363,21 @@ static void wave6_allocate_internal_buffers(struct vpu_instance *inst)
 	if (ret)
 		goto error;
 
-	return;
+	inst->allocated_fb_num++;
+
+	return true;
 
 error:
-	wave6_vpu_dec_release_fb(inst);
+	wave6_free_dma(&inst->frame_y_vbuf[idx]);
+	wave6_free_dma(&inst->frame_c_vbuf[idx]);
+	memset(&inst->frame_buf[idx], 0, sizeof(struct frame_buffer));
+	wave6_free_dma(&inst->aux_vbuf[AUX_BUF_FBC_Y_TBL][idx]);
+	wave6_free_dma(&inst->aux_vbuf[AUX_BUF_FBC_C_TBL][idx]);
+	wave6_free_dma(&inst->aux_vbuf[AUX_BUF_MV_COL][idx]);
+	vb2_queue_error(v4l2_m2m_get_src_vq(inst->v4l2_fh.m2m_ctx));
+	vb2_queue_error(v4l2_m2m_get_dst_vq(inst->v4l2_fh.m2m_ctx));
+
+	return false;
 }
 
 static int wave6_vpu_dec_handle_frame_buffer(struct vpu_instance *inst)
@@ -430,6 +457,7 @@ static void wave6_vpu_dec_handle_dst_buffer(struct vpu_instance *inst)
 		disp_buffer.chroma_bitdepth = initial_info.chroma_bitdepth;
 		disp_buffer.chroma_format_idc = initial_info.chroma_format_idc;
 
+		wave6_vpu_force_dma_sync_for_device(inst, dst_buf, DMA_FROM_DEVICE);
 		ret = wave6_vpu_dec_register_display_buffer_ex(inst, disp_buffer);
 		if (ret) {
 			dev_err(inst->dev->dev, "fail register display buffer %d", ret);
@@ -627,6 +655,7 @@ static int wave6_vpu_dec_start_decode(struct vpu_instance *inst)
 
 		src_buf = v4l2_m2m_src_buf_remove(inst->v4l2_fh.m2m_ctx);
 		if (src_buf) {
+			wave6_vpu_force_dma_sync_for_cpu(inst, src_buf, DMA_TO_DEVICE);
 			v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
 			inst->sequence++;
 			inst->processed_buf_num++;
@@ -682,6 +711,7 @@ static void wave6_handle_decoded_frame(struct vpu_instance *inst,
 		dprintk(inst->dev->dev, "[%d] error frame %d\n", inst->id, inst->sequence);
 		inst->error_buf_num++;
 	}
+	wave6_vpu_force_dma_sync_for_cpu(inst, src_buf, DMA_TO_DEVICE);
 	v4l2_m2m_buf_done(src_buf, state);
 	inst->processed_buf_num++;
 }
@@ -705,6 +735,7 @@ static void wave6_handle_skipped_frame(struct vpu_instance *inst)
 	inst->processed_buf_num++;
 	inst->error_buf_num++;
 	v4l2_m2m_src_buf_remove_by_buf(inst->v4l2_fh.m2m_ctx, src_buf);
+	wave6_vpu_force_dma_sync_for_cpu(inst, src_buf, DMA_TO_DEVICE);
 	v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
 }
 
@@ -724,13 +755,7 @@ static void wave6_handle_display_frame(struct vpu_instance *inst,
 		vpu_buf->consumed = false;
 		return;
 	}
-	for (int i = 0; i < inst->dst_fmt.num_planes; i++) {
-		dma_addr_t daddr = vb2_dma_contig_plane_dma_addr(&dst_buf->vb2_buf, i);
-		size_t sizeimage = inst->dst_fmt.plane_fmt[i].sizeimage;
-
-		wave6_vpu_force_dma_sync_single_for_cpu(inst->dev, daddr,
-							sizeimage, DMA_BIDIRECTIONAL);
-	}
+	wave6_vpu_force_dma_sync_for_cpu(inst, dst_buf, DMA_FROM_DEVICE);
 
 	if (inst->dst_fmt.num_planes == 1) {
 		vb2_set_plane_payload(&dst_buf->vb2_buf, 0,
@@ -843,9 +868,13 @@ static void wave6_event_src_ch_resolution(struct vpu_instance *inst)
 static void wave6_vpu_dec_handle_source_change(struct vpu_instance *inst,
 					       struct dec_initial_info *info)
 {
-	dprintk(inst->dev->dev, "pic size %dx%d profile %d, min_fb_cnt : %d | min_disp_cnt : %d\n",
-		info->pic_width, info->pic_height,
-		info->profile, info->min_frame_buffer_count, info->frame_buf_delay);
+	dprintk(inst->dev->dev,
+		"pic size %dx%d profile %d, min_fb_cnt : %d | min_disp_cnt : %d, change 0x%x\n",
+		info->pic_width, info->pic_height, info->profile,
+		info->min_frame_buffer_count, info->frame_buf_delay,
+		info->seq_change_info);
+
+	cancel_work_sync(&inst->fb_work);
 
 	wave6_vpu_dec_retry_one_frame(inst);
 
@@ -865,12 +894,13 @@ static void wave6_vpu_dec_handle_source_change(struct vpu_instance *inst,
 
 	trace_source_change(inst, info);
 
-	if (info->seq_change_info & ~SEQ_CHANGE_WITHOUT_REALLOCATION) {
-		scoped_guard(mutex, &inst->fbc_lock)
+	scoped_guard(mutex, &inst->fbc_lock) {
+		if (info->seq_change_info & ~SEQ_CHANGE_WITHOUT_REALLOCATION)
 			wave6_vpu_dec_give_command(inst, DEC_RESET_FRAMEBUF_INFO, NULL);
-	} else {
-		inst->registered_fb_num = 0;
+		else
+			inst->registered_fb_num = 0;
 	}
+	queue_work(inst->workqueue, &inst->fb_work);
 
 	wave6_event_src_ch_resolution(inst);
 }
@@ -1510,6 +1540,17 @@ error_pm:
 	return ret;
 }
 
+static void wave6_vpu_dec_fb_work(struct work_struct *work)
+{
+	struct vpu_instance *inst = container_of(work, struct vpu_instance,
+						 fb_work);
+	bool success;
+
+	do {
+		success = wave6_allocate_internal_buffer(inst);
+	} while (success);
+}
+
 static int wave6_vpu_dec_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 				     unsigned int *num_planes, unsigned int sizes[],
 				     struct device *alloc_devs[])
@@ -1622,13 +1663,10 @@ static void wave6_vpu_dec_buf_queue_dst(struct vb2_buffer *vb)
 		vb2_plane_size(&vbuf->vb2_buf, 1), vb2_plane_size(&vbuf->vb2_buf, 2));
 
 	inst->queued_dst_buf_num++;
-	if (inst->v4l2_fh.m2m_ctx->next_buf_last) {
+	if (inst->v4l2_fh.m2m_ctx->next_buf_last)
 		wave6_handle_last_frame(inst, vbuf);
-	} else {
-		if (inst->state >= VPU_INST_STATE_INIT_SEQ)
-			wave6_allocate_internal_buffers(inst);
+	else
 		v4l2_m2m_buf_queue(inst->v4l2_fh.m2m_ctx, vbuf);
-	}
 }
 
 static void wave6_vpu_dec_buf_queue(struct vb2_buffer *vb)
@@ -1886,8 +1924,18 @@ static int wave6_vpu_open_dec(struct file *filp)
 	inst->quantization = V4L2_QUANTIZATION_DEFAULT;
 	inst->xfer_func = V4L2_XFER_FUNC_DEFAULT;
 
+	inst->workqueue = alloc_ordered_workqueue("wave6-dec", WQ_MEM_RECLAIM);
+	if (!inst->workqueue) {
+		dev_err(inst->dev->dev, "Failed to alloc workqueue\n");
+		ret = -EINVAL;
+		goto err_ctrl_free;
+	}
+	INIT_WORK(&inst->fb_work, wave6_vpu_dec_fb_work);
+
 	return 0;
 
+err_ctrl_free:
+	v4l2_ctrl_handler_free(&inst->v4l2_ctrl_hdl);
 err_m2m_release:
 	v4l2_m2m_ctx_release(inst->v4l2_fh.m2m_ctx);
 free_inst:
@@ -1906,6 +1954,8 @@ static int wave6_vpu_dec_release(struct file *filp)
 	struct vpu_instance *inst = wave6_to_vpu_inst(file_to_v4l2_fh(filp));
 
 	dprintk(inst->dev->dev, "[%d] release\n", inst->id);
+
+	cancel_work_sync(&inst->fb_work);
 	v4l2_m2m_ctx_release(inst->v4l2_fh.m2m_ctx);
 
 	mutex_lock(&inst->queue_lock);
@@ -1913,6 +1963,7 @@ static int wave6_vpu_dec_release(struct file *filp)
 		wave6_vpu_dec_destroy_instance(inst);
 	mutex_unlock(&inst->queue_lock);
 
+	destroy_workqueue(inst->workqueue);
 	imx_mur_release_v4l2_ctrl(inst->recorder);
 	v4l2_ctrl_handler_free(&inst->v4l2_ctrl_hdl);
 	v4l2_fh_del(&inst->v4l2_fh, filp);

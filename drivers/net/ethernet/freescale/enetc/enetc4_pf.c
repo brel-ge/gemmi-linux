@@ -123,7 +123,7 @@ static void enetc4_pf_set_si_mac_hash_filter(struct enetc_hw *hw, int si,
 	if (type == UC)
 		enetc4_pf_set_si_uc_hash_filter(hw, si, hash);
 	else
-		enetc4_pf_set_si_uc_hash_filter(hw, si, hash);
+		enetc4_pf_set_si_mc_hash_filter(hw, si, hash);
 }
 
 static void enetc4_pf_set_loopback(struct net_device *ndev, bool en)
@@ -534,6 +534,9 @@ static void enetc4_default_rings_allocation(struct enetc_pf *pf)
 
 	val = enetc4_psicfgr0_val_construct(false, num_tx_bdr, num_rx_bdr);
 	enetc_port_wr(hw, ENETC4_PSICFGR0(0), val);
+
+	if (!pf->caps.num_vsi)
+		return;
 
 	num_rx_bdr = pf->caps.num_rx_bdr - num_rx_bdr;
 	rx_rem = num_rx_bdr % pf->caps.num_vsi;
@@ -958,6 +961,24 @@ static int enetc4_pf_set_features(struct net_device *ndev,
 	struct enetc_ndev_priv *priv = netdev_priv(ndev);
 	struct enetc_hw *hw = &priv->si->hw;
 
+	if ((changed & NETIF_F_RXHASH) && (features & NETIF_F_RXHASH)) {
+		struct enetc_vlan_to_bdr *v = &priv->vlan_to_bdr;
+		int count;
+
+		/* This and enetc4_setup_vlan_to_bdr() both run under RTNL, so
+		 * the count can't change after being read here.
+		 */
+		mutex_lock(&v->lock);
+		count = v->count;
+		mutex_unlock(&v->lock);
+
+		if (count) {
+			netdev_err(ndev,
+				   "Can't enable RSS while VLAN steering on\n");
+			return -EBUSY;
+		}
+	}
+
 	if (changed & NETIF_F_HW_VLAN_CTAG_FILTER) {
 		bool promisc_en = !(features & NETIF_F_HW_VLAN_CTAG_FILTER);
 
@@ -1220,22 +1241,14 @@ static void enetc4_set_rx_pause(struct enetc_pf *pf, bool rx_pause)
 	enetc_port_mac_wr(si, ENETC4_PM_CMD_CFG(0), val);
 }
 
-static void enetc4_set_tx_pause(struct enetc_pf *pf, int num_rxbdr, bool tx_pause)
+static void enetc4_set_tx_pause(struct enetc_pf *pf, bool tx_pause)
 {
+	struct enetc_ndev_priv *priv = netdev_priv(pf->si->ndev);
 	u32 pause_off_thresh = 0, pause_on_thresh = 0;
 	u32 init_quanta = 0, refresh_quanta = 0;
 	struct enetc_hw *hw = &pf->si->hw;
-	u32 rbmr, old_rbmr;
-	int i;
 
-	for (i = 0; i < num_rxbdr; i++) {
-		old_rbmr = enetc_rxbdr_rd(hw, i, ENETC_RBMR);
-		rbmr = u32_replace_bits(old_rbmr, tx_pause ? 1 : 0, ENETC_RBMR_CM);
-		if (rbmr == old_rbmr)
-			continue;
-
-		enetc_rxbdr_wr(hw, i, ENETC_RBMR, rbmr);
-	}
+	enetc_set_congestion_mode(priv, tx_pause);
 
 	if (tx_pause) {
 		/* When the port first enters congestion, send a PAUSE request
@@ -1433,7 +1446,7 @@ static void enetc4_pl_mac_link_up(struct phylink_config *config,
 			tx_pause = false;
 	}
 
-	enetc4_set_tx_pause(pf, priv->num_rx_rings, tx_pause);
+	enetc4_set_tx_pause(pf, tx_pause);
 	enetc4_set_rx_pause(pf, rx_pause);
 	enetc4_mac_tx_enable(pf);
 	enetc4_mac_rx_enable(pf);
@@ -1624,6 +1637,7 @@ static int enetc4_pf_netdev_create(struct enetc_si *si)
 
 	priv = netdev_priv(ndev);
 	mutex_init(&priv->mm_lock);
+	mutex_init(&priv->vlan_to_bdr.lock);
 
 	priv->ref_clk = devm_clk_get_optional(dev, "ref");
 	if (IS_ERR(priv->ref_clk)) {
@@ -1682,6 +1696,7 @@ err_config_si:
 	enetc_free_si_resources(priv);
 err_alloc_si_res:
 err_clk_get:
+	mutex_destroy(&priv->vlan_to_bdr.lock);
 	mutex_destroy(&priv->mm_lock);
 	free_netdev(ndev);
 
@@ -1699,6 +1714,7 @@ static void enetc4_pf_netdev_destroy(struct enetc_si *si)
 	enetc4_link_deinit(priv);
 	enetc_free_msix(priv);
 	enetc_free_si_resources(priv);
+	mutex_destroy(&priv->vlan_to_bdr.lock);
 	mutex_destroy(&priv->mm_lock);
 	free_netdev(ndev);
 }
@@ -2172,8 +2188,8 @@ static int enetc4_pf_resume(struct device *dev)
 			goto err_unlock_rtnl;
 	}
 
-	phylink_resume(priv->phylink);
 	enetc_resume(si->ndev, wol);
+	phylink_resume(priv->phylink);
 	netif_device_attach(si->ndev);
 
 	rtnl_unlock();

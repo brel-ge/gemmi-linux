@@ -58,16 +58,6 @@ static int platform_init_func(struct kbase_device *kbdev)
 
 	ictx = devm_kzalloc(kbdev->dev, sizeof(struct imx_platform_ctx), GFP_KERNEL);
 	if (pdev->num_resources > 1) {
-#ifdef IMX_GPU_BLK_CTRL
-		ictx->reg_blk_ctrl = devm_platform_ioremap_resource_byname(pdev, "gpumix_blk_ctrl");
-		if (IS_ERR_OR_NULL(ictx->reg_blk_ctrl))
-			ictx->reg_blk_ctrl = devm_platform_ioremap_resource(pdev, 1);
-
-		dev_dbg(kbdev->dev, "blk ctrl reg = %pK\n", ictx->reg_blk_ctrl);
-	}
-
-	if (pdev->num_resources > 2) {
-#endif
 		ictx->reg_tcm = devm_platform_ioremap_resource_byname(pdev, "tcm");
 		if (!IS_ERR_OR_NULL(ictx->reg_tcm))
 			dev_dbg(kbdev->dev, "wave dump reg = %pK\n", ictx->reg_tcm);
@@ -77,7 +67,11 @@ static int platform_init_func(struct kbase_device *kbdev)
 	kbdev->platform_context = ictx;
 	imx_waveform_start(kbdev);
 
-	if (of_machine_is_compatible("fsl,imx952")) {
+	kbdev->need_dynamic_config_ipa_counter =
+		of_device_is_compatible(kbdev->dev->of_node, "nxp,imx952-mali");
+	atomic_set(&kbdev->gpu_profile_enabled, 0);
+
+	if (kbdev->need_dynamic_config_ipa_counter) {
 		callbacks->power_runtime_on_callback = NULL;
 		callbacks->power_runtime_off_callback = NULL;
 	}

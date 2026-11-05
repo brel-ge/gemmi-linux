@@ -22,6 +22,7 @@
 
 #include <drm/bridge/dw_mipi_dsi.h>
 #include <drm/drm_bridge.h>
+#include <drm/drm_edid.h>
 #include <drm/drm_mipi_dsi.h>
 
 #define DSI_DPI_CFG_POL			0x14
@@ -43,6 +44,8 @@
 #define  PHY_TESTDOUT_MASK		GENMASK(15, 8)
 #define  PHY_TESTDOUT(n)		FIELD_PREP(PHY_TESTDOUT_MASK, (n))
 #define  PHY_TESTDIN(n)			FIELD_PREP(GENMASK(7, 0), (n))
+
+#define DSI_SDF_3D			0x190
 
 /* master CSR */
 #define DSI_CLOCK_GATING_CONTROL	0x0
@@ -89,7 +92,7 @@
 #define PHY_TEST_MODE_STATUS		0xc
 #define  PHY_LOCK			BIT(11)
 
-/* DPHY test control register */
+/* DPHY TX test control register */
 #define DIG_RDWR_TX_PLL_1		0x15e
 #define  PLL_CPBIAS_CNTRL_RW_MASK	GENMASK(6, 0)
 #define  PLL_CPBIAS_CNTRL_RW(n)		FIELD_PREP(PLL_CPBIAS_CNTRL_RW_MASK, (n))
@@ -136,6 +139,14 @@
 #define DIG_RDWR_TX_TX_SLEW_7		0x272
 #define DIG_RDWR_TX_CLK_TERMLOWCAP	0x402
 
+/* MIPI CSI-2 host register */
+#define CSI_PHY_TEST_CTRL0		0x50
+#define CSI_PHY_TEST_CTRL1		0x54
+
+/* DPHY RX test control register */
+#define DIG_RDWR_RX_CLKLANE_LANE_1	0x302
+#define  HSRXENTERM_BYPASS_CLKLANE_RW	BIT(1)
+
 #define IMX95_DSI_ENDPOINT_PL0		0
 #define IMX95_DSI_ENDPOINT_PL1		1
 
@@ -173,10 +184,11 @@ enum dsi_pixel_link_format {
 
 struct imx95_dsi {
 	struct device *dev;
-	void __iomem *base;
+	struct regmap *dsi;
 	struct regmap *mst;
 	struct regmap *str;
 	struct regmap *phy;
+	struct regmap *csi;
 	struct clk *clk_pixel;
 	struct clk *clk_cfg;
 	struct clk *clk_ref;
@@ -185,6 +197,7 @@ struct imx95_dsi {
 	unsigned int lane_mbps;
 	bool use_pl0;
 	enum mipi_dsi_pixel_format format;
+	unsigned long mode_flags;
 	struct dw_mipi_dsi *dmd;
 	struct dw_mipi_dsi_plat_data pdata;
 	union phy_configure_opts phy_cfg;
@@ -347,6 +360,11 @@ static int imx95_dsi_get_regmap(struct imx95_dsi *dsi)
 		return dev_err_probe(dev, PTR_ERR(dsi->phy),
 				     "failed to get phy CSR\n");
 
+	dsi->csi = syscon_regmap_lookup_by_phandle(np, "nxp,mipi-csi");
+	if (IS_ERR(dsi->csi))
+		return dev_err_probe(dev, PTR_ERR(dsi->csi),
+				     "failed to get MIPI CSI-2 host syscon\n");
+
 	return 0;
 }
 
@@ -415,17 +433,9 @@ out:
 	return ret;
 }
 
-static inline void imx95_dsi_write(struct imx95_dsi *dsi, u32 reg, u32 val)
-{
-	writel(val, dsi->base + reg);
-}
-
-static inline u32 imx95_dsi_read(struct imx95_dsi *dsi, u32 reg)
-{
-	return readl(dsi->base + reg);
-}
-
-static void imx95_dsi_phy_write_testcode(struct imx95_dsi *dsi, u16 test_code)
+static void imx95_combo_phy_write_testcode(struct regmap *regmap,
+					   u32 tst_ctrl0, u32 tst_ctrl1,
+					   u16 test_code)
 {
 	/*
 	 * Each control register address is composed by a 4-bit word(testcode
@@ -434,67 +444,78 @@ static void imx95_dsi_phy_write_testcode(struct imx95_dsi *dsi, u16 test_code)
 
 	/* 1. For writing the 4-bit testcode MSBs: */
 	/* a. Ensure that TESTCLK and TESTEN are set to low. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL0, PHY_UNTESTCLK);
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL1, PHY_UNTESTEN);
+	regmap_write(regmap, tst_ctrl0, PHY_UNTESTCLK);
+	regmap_write(regmap, tst_ctrl1, PHY_UNTESTEN);
 	/* b. Set TESTEN to high. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL1, PHY_TESTEN);
+	regmap_write(regmap, tst_ctrl1, PHY_TESTEN);
 	/* c. Set TESTCLK to high. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL0, PHY_TESTCLK);
+	regmap_write(regmap, tst_ctrl0, PHY_TESTCLK);
 	/* d. Place 0x00 in TESTDIN. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL1, PHY_TESTEN | PHY_TESTDIN(0));
+	regmap_write(regmap, tst_ctrl1, PHY_TESTEN | PHY_TESTDIN(0));
 	/*
 	 * e. Set TESTCLK to low(with the falling edge on TESTCLK, the TESTDIN
 	 * signal content is latched internally).
 	 */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL0, PHY_UNTESTCLK);
+	regmap_write(regmap, tst_ctrl0, PHY_UNTESTCLK);
 	/* f. Set TESTEN to low. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL1, PHY_UNTESTEN);
+	regmap_write(regmap, tst_ctrl1, PHY_UNTESTEN);
 	/* g. Place the MSB 8-bit word of testcode in TESTDIN. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL1, PHY_TESTDIN(test_code >> 8));
+	regmap_write(regmap, tst_ctrl1, PHY_TESTDIN(test_code >> 8));
 	/* h. Set TESTCLK to high. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL0, PHY_TESTCLK);
+	regmap_write(regmap, tst_ctrl0, PHY_TESTCLK);
 
 	/* 2. For writing the 8-bit testcode LSBs: */
 	/* a. Set TESTCLK to low. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL0, PHY_UNTESTCLK);
+	regmap_write(regmap, tst_ctrl0, PHY_UNTESTCLK);
 	/* b. Set TESTEN to high. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL1, PHY_TESTEN);
+	regmap_write(regmap, tst_ctrl1, PHY_TESTEN);
 	/* c. Set TESTCLK to high. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL0, PHY_TESTCLK);
+	regmap_write(regmap, tst_ctrl0, PHY_TESTCLK);
 	/* d. Place the LSB 8-bit word of testcode in TESTDIN. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL1,
-			PHY_TESTEN | PHY_TESTDIN(test_code & 0xff));
+	regmap_write(regmap, tst_ctrl1,
+		     PHY_TESTEN | PHY_TESTDIN(test_code & 0xff));
 	/*
 	 * e. Set TESTCLK to low(with the falling edge on TESTCLK, the TESTDIN
 	 * signal content is latched internally).
 	 */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL0, PHY_UNTESTCLK);
+	regmap_write(regmap, tst_ctrl0, PHY_UNTESTCLK);
 	/* f. Set TESTEN to low. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL1,
-			PHY_UNTESTEN | PHY_TESTDIN(test_code & 0xff));
+	regmap_write(regmap, tst_ctrl1,
+		     PHY_UNTESTEN | PHY_TESTDIN(test_code & 0xff));
 }
 
-static void
-imx95_dsi_phy_tst_ctrl_write(struct imx95_dsi *dsi, u16 test_code, u8 test_data)
+static void imx95_combo_phy_tst_ctrl_write(struct regmap *regmap,
+					   u32 tst_ctrl0, u32 tst_ctrl1,
+					   u16 test_code, u8 test_data)
 {
-	imx95_dsi_phy_write_testcode(dsi, test_code);
+	imx95_combo_phy_write_testcode(regmap, tst_ctrl0, tst_ctrl1, test_code);
 
 	/* For writing the data: */
 	/* a. Place the 8-bit word in TESTDIN. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL1, PHY_TESTDIN(test_data));
+	regmap_write(regmap, tst_ctrl1, PHY_TESTDIN(test_data));
 	/* b. Set TESTCLK to high. */
-	imx95_dsi_write(dsi, DSI_PHY_TST_CTRL0, PHY_TESTCLK);
+	regmap_write(regmap, tst_ctrl0, PHY_TESTCLK);
 }
 
-static u8 imx95_dsi_phy_tst_ctrl_read(struct imx95_dsi *dsi, u16 test_code)
+static u8 imx95_combo_phy_tst_ctrl_read(struct regmap *regmap,
+					u32 tst_ctrl0, u32 tst_ctrl1,
+					u16 test_code)
 {
-	u32 val;
+	unsigned int val;
 
-	imx95_dsi_phy_write_testcode(dsi, test_code);
+	imx95_combo_phy_write_testcode(regmap, tst_ctrl0, tst_ctrl1, test_code);
 
 	/* For reading the data: */
-	val = imx95_dsi_read(dsi, DSI_PHY_TST_CTRL1);
+	regmap_read(regmap, tst_ctrl1, &val);
 	return FIELD_GET(PHY_TESTDOUT_MASK, val);
+}
+
+static void imx95_dsi_phy_tst_ctrl_write(struct imx95_dsi *dsi,
+					 u16 test_code, u8 test_data)
+{
+	imx95_combo_phy_tst_ctrl_write(dsi->dsi,
+				       DSI_PHY_TST_CTRL0, DSI_PHY_TST_CTRL1,
+				       test_code, test_data);
 }
 
 static void
@@ -502,9 +523,27 @@ imx95_dsi_phy_tst_ctrl_update(struct imx95_dsi *dsi, u16 test_code, u8 mask, u8 
 {
 	u8 tmp;
 
-	tmp = imx95_dsi_phy_tst_ctrl_read(dsi, test_code);
+	tmp = imx95_combo_phy_tst_ctrl_read(dsi->dsi,
+					    DSI_PHY_TST_CTRL0, DSI_PHY_TST_CTRL1,
+					    test_code);
 	tmp &= ~mask;
 	imx95_dsi_phy_tst_ctrl_write(dsi, test_code, tmp | val);
+}
+
+static void imx95_csi_phy_tst_ctrl_write(struct imx95_dsi *dsi,
+					 u16 test_code, u8 test_data)
+{
+	imx95_combo_phy_tst_ctrl_write(dsi->csi,
+				       CSI_PHY_TEST_CTRL0, CSI_PHY_TEST_CTRL1,
+				       test_code, test_data);
+}
+
+static u8 imx95_csi_phy_tst_ctrl_read(struct imx95_dsi *dsi, u16 test_code)
+{
+	return imx95_combo_phy_tst_ctrl_read(dsi->csi,
+					     CSI_PHY_TEST_CTRL0,
+					     CSI_PHY_TEST_CTRL1,
+					     test_code);
 }
 
 static inline unsigned long data_rate_to_fout(unsigned long data_rate)
@@ -779,7 +818,7 @@ static int imx95_dsi_phy_init(void *priv_data)
 		return bpp;
 	}
 
-	imx95_dsi_write(dsi, DSI_DPI_CFG_POL, VSYNC_ACTIVE_LOW | HSYNC_ACTIVE_LOW);
+	regmap_write(dsi->dsi, DSI_DPI_CFG_POL, VSYNC_ACTIVE_LOW | HSYNC_ACTIVE_LOW);
 
 	regmap_write(dsi->mst, DSI_CLOCK_SETTING, 0);
 
@@ -796,6 +835,14 @@ static int imx95_dsi_phy_init(void *priv_data)
 	default:
 		dev_err(dsi->dev, "invalid dsi format bpp %d\n", bpp);
 		return -EINVAL;
+	}
+
+	imx95_csi_phy_tst_ctrl_write(dsi, DIG_RDWR_RX_CLKLANE_LANE_1,
+				     HSRXENTERM_BYPASS_CLKLANE_RW);
+	if (imx95_csi_phy_tst_ctrl_read(dsi, DIG_RDWR_RX_CLKLANE_LANE_1) !=
+	    HSRXENTERM_BYPASS_CLKLANE_RW) {
+		dev_err(dsi->dev, "failed to set DPHY RX HSRXENTERM bypass\n");
+		return -EIO;
 	}
 
 	lane_mask = int_pow(2, dsi->lanes) - 1;
@@ -863,6 +910,30 @@ static int imx95_dsi_get_phy_configure_opts(struct imx95_dsi *dsi,
 	return 0;
 }
 
+static bool imx95_dsi_is_mode_clock_valid(unsigned int clock)
+{
+	switch (clock) {
+	case 25200:   /* 640x480@60Hz (VGA) */
+	case 27000:   /* 480p@59.94Hz, 720x480@59.94Hz (NTSC) */
+	case 27027:   /* 480p@60Hz, 720x480@60Hz */
+	case 40000:   /* 800x600@60Hz (SVGA) */
+	case 54000:   /* 480p@119.88Hz, 720x576@100Hz */
+	case 54054:   /* 480p@120Hz, 720x480@120Hz */
+	case 65000:   /* 1024x768@60Hz (XGA) */
+	case 74176:   /* 720p@59.94Hz, 1280x720@59.94Hz */
+	case 74250:   /* 720p@60Hz, 1280x720@60Hz */
+	case 108000:  /* 480p@239.76Hz, 1280x1024@60Hz (SXGA) */
+	case 108108:  /* 480p@240Hz, 720x480@240Hz */
+	case 132000:  /* 1024x768@120Hz (XGA) */
+	case 148352:  /* 1080p@59.94Hz, 1920x1080@59.94Hz */
+	case 148500:  /* 1080p@60Hz, 1920x1080@60Hz */
+	case 297000:  /* 2160p@30Hz, 1080p@120Hz, 3840x2160@30Hz (4K) */
+		return true;
+	default:
+		return false;
+	}
+}
+
 static enum drm_mode_status
 imx95_dsi_validate_mode(struct imx95_dsi *dsi, const struct drm_display_mode *mode)
 {
@@ -873,13 +944,7 @@ imx95_dsi_validate_mode(struct imx95_dsi *dsi, const struct drm_display_mode *mo
 	list_for_each_entry_reverse(iter, &encoder->bridge_chain, chain_node) {
 		if ((iter->ops & DRM_BRIDGE_OP_DETECT) &&
 		    (iter->ops & DRM_BRIDGE_OP_EDID)) {
-			/*
-			 * Since clk_round_rate() returns unreasonable rate for
-			 * dsi->clk_pixel, we have to validate mode against
-			 * magic mode clock rates.
-			 */
-			if (mode->clock != 297000 && mode->clock != 148500 &&
-			    mode->clock != 74250)
+			if (!imx95_dsi_is_mode_clock_valid(mode->clock))
 				return MODE_NOCLOCK;
 
 			break;
@@ -940,6 +1005,36 @@ imx95_dsi_mode_valid(void *priv_data, const struct drm_display_mode *mode,
 	return MODE_OK;
 }
 
+static bool imx95_dsi_has_fractional_word_count(const struct drm_display_mode *mode,
+						int bpp, unsigned int lanes,
+						unsigned long flags)
+{
+	int i, vic;
+
+	/* Workarounds for common modes that need to round htotal up when
+	 * using 4 data lanes and 24 bpp. The standard horizontal timings
+	 * cannot display correctly for these modes due to rounding:
+	 *    VIC 2,3   -> 720x480 @ 60 Hz
+	 *    VIC 48,49 -> 720x480 @ 120 Hz
+	 *    VIC 56,57 -> 720x480 @ 240 Hz
+	 *    VIC 32,72 -> 1920x1080 @ 24 Hz
+	 */
+	const u8 fixup_modes[] = {2, 3, 48, 49, 56, 57, 32, 72};
+
+	if (flags & MIPI_DSI_MODE_VIDEO_BURST || lanes != 4 || bpp != 24)
+		return false;
+
+	vic = drm_match_cea_mode(mode);
+	if (vic) {
+		for (i = 0; i < ARRAY_SIZE(fixup_modes); i++) {
+			if (fixup_modes[i] == vic)
+				return true;
+		}
+	}
+
+	return false;
+}
+
 static bool imx95_dsi_mode_fixup(void *priv_data,
 				 const struct drm_display_mode *mode,
 				 struct drm_display_mode *adjusted_mode)
@@ -947,12 +1042,47 @@ static bool imx95_dsi_mode_fixup(void *priv_data,
 	struct imx95_dsi *dsi = priv_data;
 	unsigned long pixel_clock_rate;
 	unsigned long rounded_rate;
+	int bpp;
+
+	bpp = mipi_dsi_pixel_format_to_bpp(dsi->format);
+	if (bpp < 0) {
+		dev_err(dsi->dev, "failed to get bpp for pixel format %d\n", dsi->format);
+		return false;
+	}
 
 	pixel_clock_rate = mode->clock * 1000;
 	rounded_rate = clk_round_rate(dsi->clk_pixel, pixel_clock_rate);
 
 	memcpy(adjusted_mode, mode, sizeof(*mode));
 	adjusted_mode->clock = rounded_rate / 1000;
+
+	/* Add 2 pixels to htotal to round up fractional MIPI word count per line.
+	 * With 4 lanes and 24 bpp, certain modes result in non-integer
+	 * word counts (words per line) that require rounding up the horizontal total.
+	 *
+	 *  Words per line = htotal x BPP / (lanes x 8 bits/byte)
+	 *
+	 * for 24 bpp using 4 lanes,
+	 *
+	 *  Words per line = htotal x 24 BPP / (4 lanes x 8 bits/byte) = htotal x 3/4
+	 *
+	 *  if htotal = 858, then words per line = 858 x 3/4 = 643.5
+	 *
+	 */
+	if (imx95_dsi_has_fractional_word_count(mode, bpp, dsi->lanes, dsi->mode_flags)) {
+		/* Add 2 pixels to round up to next whole MIPI word count.
+		 * Note: This is only supported for 24 bpp and 4 lanes which is
+		 *       the most common case.
+		 */
+		adjusted_mode->hsync_start += 2;
+		adjusted_mode->hsync_end   += 2;
+		adjusted_mode->htotal      += 2;
+
+		dev_dbg(dsi->dev, "adj htotal %u for mode " DRM_MODE_FMT "\n",
+			adjusted_mode->htotal, DRM_MODE_ARG(mode));
+	}
+
+	drm_mode_set_crtcinfo(adjusted_mode, 0);
 
 	dev_dbg(dsi->dev, "adj clock %d for mode " DRM_MODE_FMT "\n",
 		adjusted_mode->clock, DRM_MODE_ARG(mode));
@@ -1105,6 +1235,7 @@ static int imx95_dsi_imx_host_attach(void *priv_data,
 
 	dsi->lanes = device->lanes;
 	dsi->format = device->format;
+	dsi->mode_flags = device->mode_flags;
 
 	return 0;
 }
@@ -1136,10 +1267,19 @@ static int imx95_dsi_parse_dt(struct imx95_dsi *dsi)
 	return 0;
 }
 
+static const struct regmap_config dsi_regmap_config = {
+	.reg_bits = 8,
+	.val_bits = 32,
+	.reg_stride = 4,
+	.max_register = DSI_SDF_3D,
+	.name = "mipi-dsi",
+};
+
 static int imx95_dsi_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct imx95_dsi *dsi;
+	void __iomem *base;
 	int ret;
 
 	dsi = devm_kzalloc(dev, sizeof(*dsi), GFP_KERNEL);
@@ -1149,15 +1289,20 @@ static int imx95_dsi_probe(struct platform_device *pdev)
 	dsi->dev = dev;
 	platform_set_drvdata(pdev, dsi);
 
-	dsi->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(dsi->base))
-		return PTR_ERR(dsi->base);
+	base = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(base))
+		return PTR_ERR(base);
+
+	dsi->dsi = devm_regmap_init_mmio(dev, base, &dsi_regmap_config);
+	if (IS_ERR(dsi->dsi))
+		return dev_err_probe(dev, PTR_ERR(dsi->dsi),
+				     "failed to create MIPI DSI regmap\n");
 
 	ret = imx95_dsi_parse_dt(dsi);
 	if (ret)
 		return ret;
 
-	dsi->pdata.base = dsi->base;
+	dsi->pdata.base = base;
 	dsi->pdata.max_data_lanes = 4;
 	dsi->pdata.mode_valid = imx95_dsi_mode_valid;
 	dsi->pdata.mode_fixup = imx95_dsi_mode_fixup;

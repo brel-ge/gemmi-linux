@@ -363,6 +363,13 @@ struct enetc_si {
 
 	struct net_device *ndev; /* back ref. */
 
+	/* General-purpose lock serializing updates that must not race,
+	 * e.g. read-modify-write of shared hardware registers and of
+	 * selected priv->flags bits between the phylink link callbacks
+	 * and the ring (re)configuration path.
+	 */
+	spinlock_t gen_lock;
+
 	union {
 		struct enetc_cbdr cbd_ring; /* Only ENETC 1.0 */
 		struct ntmp_user ntmp_user; /* ENETC 4.1 and later */
@@ -489,6 +496,7 @@ enum enetc_flags_bit {
 	ENETC_TX_ONESTEP_TSTAMP_IN_PROGRESS = 0,
 	ENETC_TX_DOWN,
 	ENETC_SUSPEND,
+	ENETC_RXBDR_CM,
 };
 
 /* interrupt coalescing modes */
@@ -504,6 +512,21 @@ enum enetc_ic_mode {
 
 #define ENETC_RXIC_PKTTHR	min_t(u32, 256, ENETC_RX_RING_DEFAULT_SIZE / 2)
 #define ENETC_TXIC_PKTTHR	min_t(u32, 128, ENETC_TX_RING_DEFAULT_SIZE / 2)
+
+#define ENETC_VLAN_TO_BDR_MAX	8
+
+struct enetc_vlan_to_bdr_rule {
+	unsigned long cookie;
+	bool used;
+	u8 ring;	/* target receive BD ring within the group */
+};
+
+struct enetc_vlan_to_bdr {
+	/* Rules indexed by IPV (which equals the matched VLAN PCP). */
+	struct enetc_vlan_to_bdr_rule rules[ENETC_VLAN_TO_BDR_MAX];
+	struct mutex lock;	/* serialize VLAN-to-BDR rule updates */
+	int count;		/* number of active rules */
+};
 
 struct enetc_ndev_priv {
 	struct net_device *ndev;
@@ -533,6 +556,9 @@ struct enetc_ndev_priv {
 	struct enetc_cls_rule *cls_rules;
 
 	struct psfp_cap psfp_cap;
+
+	/* Ingress QoS VLAN priority to Rx ring (BDR) steering rules. */
+	struct enetc_vlan_to_bdr vlan_to_bdr;
 
 	/* Minimum number of TX queues required by the network stack */
 	unsigned int min_num_stack_tx_queues;
@@ -594,6 +620,7 @@ void enetc_reset_mac_addr_filter(struct enetc_mac_filter *filter);
 int enetc_vid_hash_idx(unsigned int vid);
 void enetc_refresh_vlan_ht_filter(struct enetc_si *si);
 int enetc_restore_hw_config(struct enetc_si *si);
+void enetc_set_congestion_mode(struct enetc_ndev_priv *priv, bool enable);
 
 int enetc_open(struct net_device *ndev);
 int enetc_close(struct net_device *ndev);

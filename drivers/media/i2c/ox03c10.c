@@ -6,6 +6,7 @@
  *
  */
 
+#include <linux/bitfield.h>
 #include <linux/i2c.h>
 #include <linux/regmap.h>
 
@@ -20,6 +21,9 @@
 
 #define OX03C10_I2C_ADDR		0x36
 #define OX03C10_PIXEL_RATE		90000000L
+
+#define OX03C10_I2C_MAX_RETRIES	5
+#define OX03C10_I2C_RETRY_DELAY_US	2000
 
 #define OX03C10_EXPOSURE_MIN		2U
 
@@ -1229,6 +1233,22 @@ int ox03c10_set_mode(struct ox03c10 *sensor, const struct ox03c10_mode *mode)
 }
 EXPORT_SYMBOL(ox03c10_set_mode);
 
+static int ox03c10_regmap_write_retry(struct regmap *rmap, unsigned int reg, unsigned int val)
+{
+	int ret;
+	int retry;
+
+	for (retry = 0; retry < OX03C10_I2C_MAX_RETRIES; retry++) {
+		ret = regmap_write(rmap, reg, val);
+		if (!ret)
+			return 0;
+
+		fsleep(OX03C10_I2C_RETRY_DELAY_US);
+	}
+
+	return ret;
+}
+
 static int ox03c10_sensor_init(struct ox03c10 *sensor)
 {
 	const struct ox03c10_reg *reg;
@@ -1250,7 +1270,7 @@ static int ox03c10_sensor_init(struct ox03c10 *sensor)
 		if (reg->addr == OX03C10_GRP_HOLD_8 && (reg->val == 0x14 || reg->val == 0x15))
 			regcache_cache_bypass(sensor->rmap, false);
 
-		ret = regmap_write(sensor->rmap, reg->addr, reg->val);
+		ret = ox03c10_regmap_write_retry(sensor->rmap, reg->addr, reg->val);
 		if (ret < 0) {
 			dev_err(&sensor->client->dev, "Failed to write addr 0x%04x with 0x%02x\n",
 				reg->addr, reg->val);
@@ -1265,13 +1285,24 @@ static int ox03c10_sensor_init(struct ox03c10 *sensor)
 			regcache_cache_bypass(sensor->rmap, true);
 	}
 
+	ret = ox03c10_regmap_write_retry(sensor->rmap, OX03C10_MIPI_CTRL13,
+					 FIELD_PREP(OX03C10_MIPI_CTRL13_VC0, sensor->vc) |
+					 FIELD_PREP(OX03C10_MIPI_CTRL13_VC1, sensor->vc) |
+					 FIELD_PREP(OX03C10_MIPI_CTRL13_VC2, sensor->vc) |
+					 FIELD_PREP(OX03C10_MIPI_CTRL13_VC3, sensor->vc));
+	if (ret < 0) {
+		dev_err(&sensor->client->dev,
+			"Failed to set sensor's VC %u: %d\n", sensor->vc, ret);
+		return ret;
+	}
+
 	sensor->cur_mode = &ox03c10_modes[0];
 
 	return ox03c10_get_initial_params(sensor);
 }
 
 struct ox03c10 *ox03c10_init_with_dummy_client(struct i2c_client *client,
-					       bool use_dummy)
+					       bool use_dummy, u32 vc)
 {
 	struct device *dev = &client->dev;
 	struct ox03c10 *sensor;
@@ -1301,6 +1332,16 @@ struct ox03c10 *ox03c10_init_with_dummy_client(struct i2c_client *client,
 		dev_err(dev, "Failed to allocate sensor register map: %d\n", ret);
 		goto error;
 	}
+
+	if (vc > 3) {
+		dev_err(dev, "Virtual channel %u is not supported.\n", vc);
+		ret = -EINVAL;
+		goto error;
+	}
+
+	sensor->vc = vc;
+
+	dev_info(dev, "sensor virtual channel: %u\n", sensor->vc);
 
 	ret = ox03c10_sensor_init(sensor);
 	if (ret)

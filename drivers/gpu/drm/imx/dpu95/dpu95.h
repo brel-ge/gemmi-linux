@@ -15,10 +15,12 @@
 #include <linux/regmap.h>
 #include <linux/types.h>
 
+#include <drm/drm_atomic.h>
 #include <drm/drm_color_mgmt.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_plane.h>
+#include <drm/drm_property.h>
 
 /* IRQ register */
 #define INTERRUPTENABLE(n)		(0x8 + 0x4 * (n))
@@ -90,6 +92,7 @@ enum dpu95_unit_type {
 
 enum dpu95_unit_name {
 	DPU95_CONSTFRAME,
+	DPU95_COLORMATRIX,
 	DPU95_DOMAINBLEND,
 	DPU95_DITHER,
 	DPU95_EXTDST,
@@ -136,6 +139,15 @@ enum dpu95_link_id {
 	DPU95_LINK_ID_MATRIX4		= 0x23,
 	DPU95_LINK_ID_HSCALER4		= 0x24,
 	DPU95_LINK_ID_VSCALER4		= 0x25,
+};
+
+enum dpu95_cm_mode {
+	/* input data is bypassed */
+	CM_MODE_NEUTRAL,
+	/* input data is multiplied with matrix values */
+	CM_MODE_MATRIX,
+	/* input color is multiplied with input alpha */
+	CM_MODE_PREMUL,
 };
 
 enum dpu95_db_modecontrol {
@@ -275,6 +287,7 @@ struct dpu95_soc {
 	struct irq_domain		*disp_irq2_domain;
 
 	struct dpu95_constframe		*cf[4];
+	struct dpu95_matrix		*cm[4];
 	struct dpu95_domainblend	*db[2];
 	struct dpu95_dither		*dt[2];
 	struct dpu95_extdst		*ed[4];
@@ -320,6 +333,7 @@ struct dpu95_data {
 
 	int irq_cnt;
 	const unsigned long *unused_irq;
+	int (* const get_platform_irq_num)(int irq);
 
 	int *comctrl_irq;
 	int comctrl_irq_cnt;
@@ -377,6 +391,17 @@ struct dpu95_constframe *dpu95_cf_cont_get(struct dpu95_soc *dpu,
 					   unsigned int stream_id);
 void dpu95_cf_hw_init(struct dpu95_soc *dpu, unsigned int index);
 int dpu95_cf_init(struct dpu95_soc *dpu, unsigned int index,
+		  unsigned int id, enum dpu95_unit_type type,
+		  unsigned long pec_base, unsigned long base);
+
+/* Color Matrix Unit */
+struct dpu95_matrix;
+void dpu95_cm_mode(struct dpu95_matrix *cm, enum dpu95_cm_mode m);
+void dpu95_cm_set_matrix(struct dpu95_matrix *cm,
+			 struct drm_property_blob *ctm_blob);
+struct dpu95_matrix *dpu95_cm_get(struct dpu95_soc *dpu, unsigned int id);
+void dpu95_cm_hw_init(struct dpu95_soc *dpu, unsigned int index);
+int dpu95_cm_init(struct dpu95_soc *dpu, unsigned int index,
 		  unsigned int id, enum dpu95_unit_type type,
 		  unsigned long pec_base, unsigned long base);
 
@@ -476,11 +501,8 @@ int dpu95_fy_init(struct dpu95_soc *dpu, unsigned int index,
 struct dpu95_hscaler;
 
 struct dpu95_hscaler_ops {
-	bool (*is_enabled)(struct dpu95_hscaler *hs);
-	void (*set_stream_id)(struct dpu95_hscaler *hs, unsigned int stream_id);
-	unsigned int (*get_stream_id)(struct dpu95_hscaler *hs);
-	void (*set_no_stream_id)(struct dpu95_hscaler *hs);
-	bool (*has_stream_id)(struct dpu95_hscaler *hs);
+	struct drm_private_obj *(*get_manager)(struct dpu95_hscaler *hs);
+	void (*set_manager)(struct dpu95_hscaler *hs, struct drm_private_obj *manager);
 };
 
 const struct dpu95_hscaler_ops *dpu95_hs_get_ops(struct dpu95_hscaler *hs);
@@ -507,6 +529,16 @@ int dpu95_hs_init(struct dpu95_soc *dpu, unsigned int index,
 
 /* Layer Blend Unit */
 struct dpu95_layerblend;
+
+struct dpu95_layerblend_ops {
+	struct drm_private_obj *(*get_manager)(struct dpu95_layerblend *lb);
+	void (*set_manager)(struct dpu95_layerblend *lb, struct drm_private_obj *manager);
+};
+
+const struct dpu95_layerblend_ops *dpu95_lb_get_ops(struct dpu95_layerblend *lb);
+struct dpu95_layerblend *dpu95_lb_get_from_list(struct list_head *l);
+void dpu95_lb_add_to_list(struct dpu95_layerblend *lb, struct list_head *l);
+
 enum dpu95_link_id dpu95_lb_get_link_id(struct dpu95_layerblend *lb);
 void dpu95_lb_pec_dynamic_prim_sel(struct dpu95_layerblend *lb,
 				   enum dpu95_link_id prim);
@@ -540,11 +572,8 @@ int dpu95_ld_disable(struct dpu95_localdimming *ld);
 struct dpu95_vscaler;
 
 struct dpu95_vscaler_ops {
-	bool (*is_enabled)(struct dpu95_vscaler *vs);
-	void (*set_stream_id)(struct dpu95_vscaler *hs, unsigned int stream_id);
-	unsigned int (*get_stream_id)(struct dpu95_vscaler *hs);
-	void (*set_no_stream_id)(struct dpu95_vscaler *hs);
-	bool (*has_stream_id)(struct dpu95_vscaler *hs);
+	struct drm_private_obj *(*get_manager)(struct dpu95_vscaler *vs);
+	void (*set_manager)(struct dpu95_vscaler *vs, struct drm_private_obj *manager);
 };
 
 const struct dpu95_vscaler_ops *dpu95_vs_get_ops(struct dpu95_vscaler *vs);
@@ -573,15 +602,7 @@ struct dpu95_fetchunit_ops {
 	void (*set_pec_dynamic_src_sel)(struct dpu95_fetchunit *fu,
 					enum dpu95_link_id src);
 
-	bool (*is_enabled)(struct dpu95_fetchunit *fu);
-
 	void (*set_stream_id)(struct dpu95_fetchunit *fu, unsigned int stream_id);
-
-	unsigned int (*get_stream_id)(struct dpu95_fetchunit *fu);
-
-	void (*set_no_stream_id)(struct dpu95_fetchunit *fu);
-
-	bool (*has_stream_id)(struct dpu95_fetchunit *fu);
 
 	void (*set_numbuffers)(struct dpu95_fetchunit *fu, unsigned int num);
 
@@ -615,18 +636,14 @@ struct dpu95_fetchunit_ops {
 	struct dpu95_hscaler *(*get_hscaler)(struct dpu95_fetchunit *fu);
 	struct dpu95_vscaler *(*get_vscaler)(struct dpu95_fetchunit *fu);
 
-	void (*set_layerblend)(struct dpu95_fetchunit *fu,
-			       struct dpu95_layerblend *lb);
-
-	bool (*is_available)(struct dpu95_fetchunit *fu);
-	void (*set_available)(struct dpu95_fetchunit *fu);
-	void (*set_inavailable)(struct dpu95_fetchunit *fu);
-
 	enum dpu95_link_id (*get_link_id)(struct dpu95_fetchunit *fu);
 
 	u32 (*get_cap_mask)(struct dpu95_fetchunit *fu);
 
 	const char *(*get_name)(struct dpu95_fetchunit *fu);
+
+	struct drm_private_obj *(*get_manager)(struct dpu95_fetchunit *fu);
+	void (*set_manager)(struct dpu95_fetchunit *fu, struct drm_private_obj *manager);
 };
 
 const struct dpu95_fetchunit_ops *dpu95_fu_get_ops(struct dpu95_fetchunit *fu);
@@ -649,12 +666,11 @@ struct dpu95_plane_res {
 struct dpu95_plane_grp {
 	struct dpu95_plane_res	res;
 	struct list_head	fu_list;
+	struct list_head	lb_list;
 	struct dpu95_constframe	*cf[2];
 	struct dpu95_extdst	*ed[2];
 	struct dpu95_hscaler	*hs;
 	struct dpu95_vscaler	*vs;
-	bool			hs_used;
-	bool			vs_used;
 };
 
 #endif /* __DRM_DPU95_H__ */

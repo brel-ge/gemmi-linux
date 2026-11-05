@@ -1428,6 +1428,13 @@ properties:
               - fsl,imx93-14x14-evk       # i.MX93 14x14 EVK Board
           - const: fsl,imx93
 
+      - description: i.MX937 based Boards
+        items:
+          - enum:
+              - fsl,imx937-evk             # i.MX937 EVK Board
+              - fsl,imx937-frdm            # i.MX937 FRDM Board
+          - const: fsl,imx937
+
       - description: i.MX91 Quick Start Boards
         items:
           - enum:
@@ -1454,6 +1461,7 @@ properties:
         items:
           - enum:
               - fsl,imx952-evk            # i.MX952 EVK Board
+              - fsl,imx952-frdm           # i.MX952 FRDM Board
           - const: fsl,imx952
 
       - description: PHYTEC i.MX 95 FPSC based Boards

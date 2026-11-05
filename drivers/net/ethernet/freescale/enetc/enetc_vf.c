@@ -197,7 +197,7 @@ static int enetc_vf_set_mac_addr(struct net_device *ndev, void *addr)
 
 static int enetc_msg_vf_set_vlan_promisc(struct enetc_ndev_priv *priv, bool en)
 {
-	struct enetc_msg_vlan_promsic_mode *msg;
+	struct enetc_msg_vlan_promisc_mode *msg;
 	struct enetc_msg_swbd msg_swbd;
 	struct enetc_si *si = priv->si;
 	int err;
@@ -208,7 +208,7 @@ static int enetc_msg_vf_set_vlan_promisc(struct enetc_ndev_priv *priv, bool en)
 	if (!msg_swbd.vaddr)
 		return -ENOMEM;
 
-	msg = (struct enetc_msg_vlan_promsic_mode *)msg_swbd.vaddr;
+	msg = (struct enetc_msg_vlan_promisc_mode *)msg_swbd.vaddr;
 	msg->promisc_mode = en ? ENETC_VLAN_PROMISC_MODE_ENABLE :
 				 ENETC_VLAN_PROMISC_MODE_DISABLE;
 	enetc_msg_vsi_fill_cmn_hdr(&msg_swbd, ENETC_MSG_CLASS_ID_VLAN_FILTER,
@@ -254,7 +254,7 @@ static int enetc_vf_setup_tc(struct net_device *ndev, enum tc_setup_type type,
 static void enetc_msg_vf_set_mac_promisc(struct enetc_ndev_priv *priv,
 					 int type, bool en)
 {
-	struct enetc_msg_mac_promsic_mode *msg;
+	struct enetc_msg_mac_promisc_mode *msg;
 	struct enetc_msg_swbd msg_swbd;
 
 	if (!(type & ENETC_MAC_FILTER_TYPE_ALL))
@@ -266,7 +266,7 @@ static void enetc_msg_vf_set_mac_promisc(struct enetc_ndev_priv *priv,
 	if (!msg_swbd.vaddr)
 		return;
 
-	msg = (struct enetc_msg_mac_promsic_mode *)msg_swbd.vaddr;
+	msg = (struct enetc_msg_mac_promisc_mode *)msg_swbd.vaddr;
 	msg->type = type & ENETC_MAC_FILTER_TYPE_ALL;
 	msg->promisc_mode = en ? ENETC_MAC_PROMISC_MODE_ENABLE :
 				 ENETC_MAC_PROMISC_MODE_DISABLE;
@@ -289,10 +289,10 @@ static int enetc_msg_vf_set_mac_hash_filter(struct net_device *ndev, int type)
 	struct enetc_si *si = priv->si;
 	struct netdev_hw_addr *ha;
 	u32 msg_size, tbl_cnt;
-	u64 *hash_tbl_base;
+	int i = 0;
 	int err;
 
-	tbl_cnt = (type == ENETC_MAC_FILTER_TYPE_ALL) ? 2 : 1;
+	tbl_cnt = (type == ENETC_MAC_FILTER_TYPE_ALL) ? 4 : 2;
 
 	msg_size = struct_size(msg, hash_tbl, tbl_cnt);
 	msg_swbd.size = ALIGN(msg_size, ENETC_MSG_ALIGN);
@@ -305,7 +305,6 @@ static int enetc_msg_vf_set_mac_hash_filter(struct net_device *ndev, int type)
 	msg->type = type & ENETC_MAC_FILTER_TYPE_ALL;
 	msg->size = ENETC_MAC_HASH_TABLE_SIZE_64;
 
-	hash_tbl_base = msg->hash_tbl;
 	netif_addr_lock_bh(ndev);
 	if (type & ENETC_MAC_FILTER_TYPE_UC) {
 		mac_filter = &si->mac_filter[UC];
@@ -313,10 +312,10 @@ static int enetc_msg_vf_set_mac_hash_filter(struct net_device *ndev, int type)
 		netdev_for_each_uc_addr(ha, ndev)
 			enetc_add_mac_addr_ht_filter(mac_filter, ha->addr);
 
-		memcpy(hash_tbl_base, mac_filter->mac_hash_table,
-		       sizeof(*hash_tbl_base));
+		bitmap_to_arr32(&msg->hash_tbl[i], mac_filter->mac_hash_table,
+				ENETC_MADDR_HASH_TBL_SZ);
 
-		hash_tbl_base++;
+		i += 2;
 	}
 
 	if (type & ENETC_MAC_FILTER_TYPE_MC) {
@@ -325,8 +324,8 @@ static int enetc_msg_vf_set_mac_hash_filter(struct net_device *ndev, int type)
 		netdev_for_each_mc_addr(ha, ndev)
 			enetc_add_mac_addr_ht_filter(mac_filter, ha->addr);
 
-		memcpy(hash_tbl_base, mac_filter->mac_hash_table,
-		       sizeof(*hash_tbl_base));
+		bitmap_to_arr32(&msg->hash_tbl[i], mac_filter->mac_hash_table,
+				ENETC_MADDR_HASH_TBL_SZ);
 	}
 	netif_addr_unlock_bh(ndev);
 
@@ -387,7 +386,7 @@ static int enetc_msg_vf_set_vlan_hash_filter(struct enetc_ndev_priv *priv)
 	int err;
 
 	/* Currently, hardware only supports 64 bits table size */
-	msg_size = struct_size(msg, hash_tbl, 1);
+	msg_size = struct_size(msg, hash_tbl, 2);
 	msg_swbd.size = ALIGN(msg_size, ENETC_MSG_ALIGN);
 	msg_swbd.vaddr = dma_alloc_coherent(priv->dev, msg_swbd.size,
 					    &msg_swbd.dma, GFP_KERNEL);
@@ -397,7 +396,7 @@ static int enetc_msg_vf_set_vlan_hash_filter(struct enetc_ndev_priv *priv)
 	msg = (struct enetc_msg_vlan_hash_filter *)msg_swbd.vaddr;
 	msg->size = ENETC_VLAN_HASH_TABLE_SIZE_64;
 
-	memcpy(msg->hash_tbl, si->vlan_ht_filter, sizeof(si->vlan_ht_filter));
+	bitmap_to_arr32(msg->hash_tbl, si->vlan_ht_filter, ENETC_VLAN_HT_SIZE);
 	enetc_msg_vsi_fill_cmn_hdr(&msg_swbd, ENETC_MSG_CLASS_ID_VLAN_FILTER,
 				   ENETC_MSG_SET_VLAN_HASH_TABLE, 0, 0);
 
@@ -569,23 +568,29 @@ static void enetc_vf_enable_mr_int(struct enetc_hw *hw, bool en)
 	enetc_wr(hw, ENETC_VSIIER, val);
 }
 
-static void enetc_vf_msg_handle_link_status(struct enetc_si *si, u8 class_code)
+static void enetc_vf_msg_handle_link_status(struct enetc_si *si, u8 status)
 {
+	bool tx_pause = !!(status & ENETC_PF_NC_LINK_TX_PAUSE_ENABLE);
+	bool link_down = !!(status & ENETC_PF_NC_LINK_STATUS_DOWN);
+	struct enetc_ndev_priv *priv = netdev_priv(si->ndev);
 	struct net_device *ndev = si->ndev;
 
-	switch (class_code) {
-	case ENETC_PF_NC_LINK_STATUS_UP:
-		if (!netif_carrier_ok(ndev)) {
-			netif_carrier_on(ndev);
-			netdev_info(ndev, "Link is Up\n");
-		}
-		break;
-	case ENETC_PF_NC_LINK_STATUS_DOWN:
+	if (link_down) {
 		if (netif_carrier_ok(ndev)) {
 			netif_carrier_off(ndev);
 			netdev_info(ndev, "Link is Down\n");
 		}
-		break;
+
+		return;
+	}
+
+	/* Link is up */
+	enetc_set_congestion_mode(priv, tx_pause);
+
+	if (!netif_carrier_ok(ndev)) {
+		netif_carrier_on(ndev);
+		netdev_info(ndev, "Link is Up, tx pause %s\n",
+			    tx_pause ? "on" : "off");
 	}
 }
 
@@ -600,7 +605,7 @@ static void enetc_vf_msg_task(struct work_struct *work)
 	pf_msg.code = VSIMSGRR_GET_MC(val);
 	switch (pf_msg.class_id) {
 	case ENETC_MSG_CLASS_ID_LINK_STATUS:
-		enetc_vf_msg_handle_link_status(si, pf_msg.class_code);
+		enetc_vf_msg_handle_link_status(si, pf_msg.class_code_u8);
 		break;
 	default:
 		dev_err(&si->pdev->dev,
@@ -715,12 +720,14 @@ static int enetc_vf_probe(struct pci_dev *pdev,
 	si = pci_get_drvdata(pdev);
 	enetc_vf_get_revision(si);
 
-	si->devlink = device_link_add(&pdev->dev, &pdev->physfn->dev,
-				      DL_FLAG_PM_RUNTIME |
-				      DL_FLAG_STATELESS);
-	if (!si->devlink) {
-		err = -ENOMEM;
-		goto err_devlink_add;
+	if (pdev->physfn) {
+		si->devlink = device_link_add(&pdev->dev, &pdev->physfn->dev,
+					      DL_FLAG_PM_RUNTIME |
+					      DL_FLAG_STATELESS);
+		if (!si->devlink) {
+			err = -ENOMEM;
+			goto err_devlink_add;
+		}
 	}
 
 	if (is_enetc_rev1(si))
@@ -800,7 +807,8 @@ err_setup_cbdr:
 	free_netdev(ndev);
 err_alloc_netdev:
 err_get_driver_data:
-	device_link_del(si->devlink);
+	if (si->devlink)
+		device_link_del(si->devlink);
 err_devlink_add:
 	enetc_pci_remove(pdev);
 
@@ -822,7 +830,8 @@ static void enetc_vf_remove(struct pci_dev *pdev)
 	si->ops->vf_teardown_cbdr(si);
 
 	free_netdev(si->ndev);
-	device_link_del(si->devlink);
+	if (si->devlink)
+		device_link_del(si->devlink);
 	enetc_pci_remove(pdev);
 }
 

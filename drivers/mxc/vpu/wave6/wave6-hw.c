@@ -370,6 +370,18 @@ static void wave6_get_dec_seq_result(struct vpu_instance *inst, struct dec_initi
 	info->min_frame_buffer_count = vpu_read_reg(inst->dev, W6_RET_DEC_NUM_REQUIRED_FBC_FB);
 	info->frame_buf_delay = vpu_read_reg(inst->dev, W6_RET_DEC_NUM_REORDER_DELAY);
 	info->req_mv_buffer_count = vpu_read_reg(inst->dev, W6_RET_DEC_NUM_REQUIRED_COL_BUF);
+	if (info->min_frame_buffer_count > WAVE6_MAX_FBS) {
+		dev_err(inst->dev->dev,
+			"min_frame_buffer_count %u exceeds max %u, clamp to max\n",
+			info->min_frame_buffer_count, WAVE6_MAX_FBS);
+		info->min_frame_buffer_count = WAVE6_MAX_FBS;
+	}
+	if (info->req_mv_buffer_count > WAVE6_MAX_FBS) {
+		dev_err(inst->dev->dev,
+			"req_mv_buffer_count %u exceeds max %u, clamp to max\n",
+			info->req_mv_buffer_count, WAVE6_MAX_FBS);
+		info->req_mv_buffer_count = WAVE6_MAX_FBS;
+	}
 
 	reg_val = vpu_read_reg(inst->dev, W6_RET_DEC_CROP_LEFT_RIGHT);
 	left = (reg_val >> 16) & 0xffff;
@@ -474,12 +486,18 @@ int wave6_vpu_dec_register_frame_buffer(struct vpu_instance *inst,
 	u32 endian;
 	int ret;
 
-	if (!p_dec_info->vb_fbc_y_tbl[idx].daddr)
+	if (!p_dec_info->vb_fbc_y_tbl[idx].daddr) {
+		dev_err(inst->dev->dev, "fbc_y_tbl[%d] is invalid\n", idx);
 		return -EINVAL;
-	if (!p_dec_info->vb_fbc_c_tbl[idx].daddr)
+	}
+	if (!p_dec_info->vb_fbc_c_tbl[idx].daddr) {
+		dev_err(inst->dev->dev, "fbc_c_tbl[%d] is invalid\n", idx);
 		return -EINVAL;
-	if (!p_dec_info->vb_mv[idx].daddr)
+	}
+	if (!p_dec_info->vb_mv[idx].daddr) {
+		dev_err(inst->dev->dev, "mv_col[%d] is invalid\n", idx);
 		return -EINVAL;
+	}
 
 	endian = wave6_vdi_convert_endian(p_dec_info->open_param.frame_endian);
 
@@ -1540,6 +1558,18 @@ int wave6_vpu_enc_get_seq_info(struct vpu_instance *inst, struct enc_initial_inf
 	info->min_src_frame_count = vpu_read_reg(inst->dev, W6_RET_ENC_MIN_SRC_BUF_NUM);
 	info->max_latency_pictures = vpu_read_reg(inst->dev, W6_RET_ENC_PIC_MAX_LATENCY_PICTURES);
 	info->req_mv_buffer_count = vpu_read_reg(inst->dev, W6_RET_ENC_NUM_REQUIRED_COL_BUF);
+	if (info->min_frame_buffer_count > WAVE6_MAX_FBS) {
+		dev_err(inst->dev->dev,
+			"min_frame_buffer_count %u exceeds max %u, clamp to max\n",
+			info->min_frame_buffer_count, WAVE6_MAX_FBS);
+		info->min_frame_buffer_count = WAVE6_MAX_FBS;
+	}
+	if (info->req_mv_buffer_count > WAVE6_MAX_FBS) {
+		dev_err(inst->dev->dev,
+			"req_mv_buffer_count %u exceeds max %u, clamp to max\n",
+			info->req_mv_buffer_count, WAVE6_MAX_FBS);
+		info->req_mv_buffer_count = WAVE6_MAX_FBS;
+	}
 
 	return ret;
 }

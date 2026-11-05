@@ -58,6 +58,7 @@ int wave6_vpu_dec_open(struct vpu_instance *inst, struct dec_open_param *pop)
 
 free_codec_info:
 	kfree(inst->codec_info);
+	inst->codec_info = NULL;
 	mutex_unlock(&vpu_dev->hw_lock);
 
 	return ret;
@@ -89,6 +90,7 @@ int wave6_vpu_dec_close(struct vpu_instance *inst, u32 *fail_res)
 	mutex_unlock(&vpu_dev->hw_lock);
 
 	kfree(inst->codec_info);
+	inst->codec_info = NULL;
 
 	return 0;
 }
@@ -194,47 +196,25 @@ int wave6_vpu_dec_get_aux_buffer_size(struct vpu_instance *inst,
 int wave6_vpu_dec_register_aux_buffer(struct vpu_instance *inst,
 				      struct aux_buffer_info info)
 {
-	struct dec_info *p_dec_info;
+	struct dec_info *p_dec_info = &inst->codec_info->dec_info;
 	struct aux_buffer *aux_bufs = info.buf_array;
-	struct dec_aux_buffer_size_info size_info = { 0 };
-	unsigned int expected_size;
 	unsigned int i;
-	int ret;
-
-	p_dec_info = &inst->codec_info->dec_info;
-
-	size_info.width = p_dec_info->initial_info.pic_width;
-	size_info.height = p_dec_info->initial_info.pic_height;
-	size_info.type = info.type;
-
-	ret = wave6_vpu_dec_get_aux_buffer_size(inst, size_info, &expected_size);
-	if (ret)
-		return ret;
 
 	switch (info.type) {
 	case AUX_BUF_FBC_Y_TBL:
 		for (i = 0; i < info.num; i++) {
-			if (expected_size > aux_bufs[i].size)
-				return -EINVAL;
-
 			p_dec_info->vb_fbc_y_tbl[aux_bufs[i].index].daddr = aux_bufs[i].addr;
 			p_dec_info->vb_fbc_y_tbl[aux_bufs[i].index].size = aux_bufs[i].size;
 		}
 		break;
 	case AUX_BUF_FBC_C_TBL:
 		for (i = 0; i < info.num; i++) {
-			if (expected_size > aux_bufs[i].size)
-				return -EINVAL;
-
 			p_dec_info->vb_fbc_c_tbl[aux_bufs[i].index].daddr = aux_bufs[i].addr;
 			p_dec_info->vb_fbc_c_tbl[aux_bufs[i].index].size = aux_bufs[i].size;
 		}
 		break;
 	case AUX_BUF_MV_COL:
 		for (i = 0; i < info.num; i++) {
-			if (expected_size > aux_bufs[i].size)
-				return -EINVAL;
-
 			p_dec_info->vb_mv[aux_bufs[i].index].daddr = aux_bufs[i].addr;
 			p_dec_info->vb_mv[aux_bufs[i].index].size = aux_bufs[i].size;
 		}
@@ -253,15 +233,24 @@ int wave6_vpu_dec_register_frame_buffer_ex(struct vpu_instance *inst,
 	int ret;
 	struct vpu_device *vpu_dev = inst->dev;
 
-	if (!p_dec_info->initial_info_obtained)
+	if (!p_dec_info->initial_info_obtained) {
+		dev_err(inst->dev->dev, "fail to register fbc %d, initial_info_obtained %d\n",
+			fb.index, p_dec_info->initial_info_obtained);
 		return -EINVAL;
+	}
 
-	if (fb.index < 0 || fb.index >= WAVE6_MAX_FBS)
+	if (fb.index < 0 || fb.index >= WAVE6_MAX_FBS) {
+		dev_err(inst->dev->dev, "fail to register fbc %d, out of range\n", fb.index);
 		return -EINVAL;
+	}
 
 	if (fb.stride < p_dec_info->initial_info.pic_width || (fb.stride % 8) ||
-	    fb.height < p_dec_info->initial_info.pic_height)
+	    fb.height < p_dec_info->initial_info.pic_height) {
+		dev_err(inst->dev->dev, "fail to register fbc %d, stride %d, %dx%d, %dx%d\n",
+			fb.index, fb.stride, fb.width, fb.height,
+			p_dec_info->initial_info.pic_width, p_dec_info->initial_info.pic_height);
 		return -EINVAL;
+	}
 
 	mutex_lock(&vpu_dev->hw_lock);
 
@@ -495,6 +484,7 @@ int wave6_vpu_enc_open(struct vpu_instance *inst, struct enc_open_param *pop)
 
 free_codec_info:
 	kfree(inst->codec_info);
+	inst->codec_info = NULL;
 	mutex_unlock(&vpu_dev->hw_lock);
 
 	return ret;
@@ -526,6 +516,7 @@ int wave6_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res)
 	mutex_unlock(&vpu_dev->hw_lock);
 
 	kfree(inst->codec_info);
+	inst->codec_info = NULL;
 
 	return 0;
 }

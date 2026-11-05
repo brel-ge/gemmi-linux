@@ -833,7 +833,7 @@
 	fsl,refclk-pad-mode = <IMX8_PCIE_REFCLK_PAD_INPUT>;
 	clocks = <&pcie0_refclk>;
 	clock-names = "ref";
-	status = "disabled";
+	status = "okay";
 };
 
 &pcie0 {
@@ -972,7 +972,7 @@
 	status = "okay";
 };
 
-&usdhc1 {
+m2_usdhc: &usdhc1 {
 	pinctrl-names = "default", "state_100mhz", "state_200mhz";
 	pinctrl-0 = <&pinctrl_usdhc1>;
 	pinctrl-1 = <&pinctrl_usdhc1_100mhz>;

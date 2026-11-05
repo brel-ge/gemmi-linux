@@ -161,8 +161,9 @@ struct imx_lpi2c_hwdata {
 
 struct lpi2c_imx_dma {
 	bool		using_pio_mode;
-	u8		rx_cmd_buf_len;
+	u16		rx_cmd_buf_len;
 	u8		*dma_buf;
+	u8		dma_msg_addr;
 	u16		*rx_cmd_buf;
 	unsigned int	dma_len;
 	unsigned int	tx_burst_num;
@@ -778,6 +779,8 @@ static int lpi2c_imx_alloc_rx_cmd_buf(struct lpi2c_imx_struct *lpi2c_imx)
 	struct lpi2c_imx_dma *dma = lpi2c_imx->dma;
 	u16 rx_remain = dma->dma_len;
 	int cmd_num;
+	int buf_idx = 0;
+	int cmd_idx;
 	u16 temp;
 
 	/*
@@ -786,20 +789,37 @@ static int lpi2c_imx_alloc_rx_cmd_buf(struct lpi2c_imx_struct *lpi2c_imx)
 	 * the rx command words buffer.
 	 */
 	cmd_num = DIV_ROUND_UP(rx_remain, CHUNK_DATA);
-	dma->rx_cmd_buf = kcalloc(cmd_num, sizeof(u16), GFP_KERNEL);
-	dma->rx_cmd_buf_len = cmd_num * sizeof(u16);
 
+	/*
+	 * According to ERR053261, interleave consecutive READ commands by any Repeated Start
+	 * command will help avoid losing data when RX FIFO is full, the TX FIFO is not empty.
+	 * cmd_buf should be repeat start and recv_data command pair, the DMA RX cmd buffer
+	 * sequence should be: RECV_DATA, REPEAT_START, RECV_DATA...REPEAT_START, RECV_DATA.
+	 */
+	dma->rx_cmd_buf = kcalloc(cmd_num * 2 - 1, sizeof(u16), GFP_KERNEL);
 	if (!dma->rx_cmd_buf) {
 		dev_err(&lpi2c_imx->adapter.dev, "Alloc RX cmd buffer failed\n");
 		return -ENOMEM;
 	}
 
-	for (int i = 0; i < cmd_num ; i++) {
+	for (cmd_idx = 0; cmd_idx < cmd_num; cmd_idx++) {
+		/*
+		 * First command, no Repeated Start needed; it has been issued
+		 * by lpi2c_imx_start(). Subsequent commands are a REPEAT_START
+		 * + RECV_DATA pair.
+		 * Repeated Start command: CMD[10:8] = GEN_START,
+		 *                         DATA[7:0] = 8-bit addr (incl. R/W bit).
+		 * RECV_DATA command:      CMD[10:8] = RECV_DATA,
+		 *                         DATA[7:0] = data length - 1.
+		 */
+		if (cmd_idx > 0)
+			dma->rx_cmd_buf[buf_idx++] = (u16)((GEN_START << 8) | dma->dma_msg_addr);
 		temp = rx_remain > CHUNK_DATA ? CHUNK_DATA - 1 : rx_remain - 1;
 		temp |= (RECV_DATA << 8);
-		rx_remain -= CHUNK_DATA;
-		dma->rx_cmd_buf[i] = temp;
+		dma->rx_cmd_buf[buf_idx++] = temp;
+		rx_remain -= min_t(u16, rx_remain, CHUNK_DATA);
 	}
+	dma->rx_cmd_buf_len = buf_idx * sizeof(u16);
 
 	return 0;
 }
@@ -982,10 +1002,17 @@ static void lpi2c_imx_dma_burst_num_calculate(struct lpi2c_imx_struct *lpi2c_imx
 		 * One RX cmd word can trigger DMA receive no more than 256 bytes.
 		 * The number of RX cmd words should be calculated based on the data
 		 * length.
+		 *
+		 * The ERR053261 workaround interleaves each RECV_DATA command with a
+		 * Repeated Start command, so the actual number of command words sent
+		 * over the TX channel is (cmd_num * 2 - 1), not cmd_num. The TX burst
+		 * number must be derived from this real command word count, otherwise
+		 * a residual sub-burst at the tail may never be flushed into the TX
+		 * FIFO and stall the transfer.
 		 */
 		cmd_num = DIV_ROUND_UP(dma->dma_len, CHUNK_DATA);
 		dma->tx_burst_num = lpi2c_imx_find_max_burst_num(lpi2c_imx->txfifosize,
-								 cmd_num);
+								 cmd_num * 2 - 1);
 		dma->rx_burst_num = lpi2c_imx_find_max_burst_num(lpi2c_imx->rxfifosize,
 								 dma->dma_len);
 	} else {
@@ -1089,6 +1116,8 @@ static int lpi2c_imx_dma_xfer(struct lpi2c_imx_struct *lpi2c_imx,
 
 	dma->dma_len = msg->len;
 	dma->dma_msg_flag = msg->flags;
+	/* 8-bit address including the R/W bit (always READ for the RX DMA path) */
+	dma->dma_msg_addr = i2c_8bit_addr_from_msg(msg);
 	dma->dma_buf = i2c_get_dma_safe_msg_buf(msg, I2C_DMA_THRESHOLD);
 	if (!dma->dma_buf)
 		return -ENOMEM;
@@ -1434,55 +1463,66 @@ static int lpi2c_imx_init_recovery_info(struct lpi2c_imx_struct *lpi2c_imx,
 	return 0;
 }
 
-static void dma_exit(struct device *dev, struct lpi2c_imx_dma *dma)
-{
-	if (dma->chan_rx)
-		dma_release_channel(dma->chan_rx);
-
-	if (dma->chan_tx)
-		dma_release_channel(dma->chan_tx);
-
-	devm_kfree(dev, dma);
-}
-
 static int lpi2c_dma_init(struct device *dev, dma_addr_t phy_addr)
 {
 	struct lpi2c_imx_struct *lpi2c_imx = dev_get_drvdata(dev);
 	struct lpi2c_imx_dma *dma;
+	void *group;
 	int ret;
 
-	dma = devm_kzalloc(dev, sizeof(*dma), GFP_KERNEL);
-	if (!dma)
+	/*
+	 * Open a devres group so that all resources allocated within
+	 * this function can be released together if DMA init fails but
+	 * probe continues in PIO mode.
+	 */
+	group = devres_open_group(dev, NULL, GFP_KERNEL);
+	if (!group)
 		return -ENOMEM;
+
+	dma = devm_kzalloc(dev, sizeof(*dma), GFP_KERNEL);
+	if (!dma) {
+		ret = -ENOMEM;
+		goto release_group;
+	}
 
 	dma->phy_addr = phy_addr;
 
 	/* Prepare for TX DMA: */
-	dma->chan_tx = dma_request_chan(dev, "tx");
+	dma->chan_tx = devm_dma_request_chan(dev, "tx");
 	if (IS_ERR(dma->chan_tx)) {
 		ret = PTR_ERR(dma->chan_tx);
 		if (ret != -ENODEV && ret != -EPROBE_DEFER)
 			dev_err(dev, "can't request DMA tx channel (%d)\n", ret);
-		dma->chan_tx = NULL;
-		goto dma_exit;
+		goto release_group;
 	}
 
 	/* Prepare for RX DMA: */
-	dma->chan_rx = dma_request_chan(dev, "rx");
+	dma->chan_rx = devm_dma_request_chan(dev, "rx");
 	if (IS_ERR(dma->chan_rx)) {
 		ret = PTR_ERR(dma->chan_rx);
 		if (ret != -ENODEV && ret != -EPROBE_DEFER)
 			dev_err(dev, "can't request DMA rx channel (%d)\n", ret);
-		dma->chan_rx = NULL;
-		goto dma_exit;
+		goto release_group;
 	}
+
+	/*
+	 * DMA init succeeded. Remove the group marker but keep all resources
+	 * bound to the device, they will be freed at device removal.
+	 */
+	devres_remove_group(dev, group);
 
 	lpi2c_imx->can_use_dma = true;
 	lpi2c_imx->dma = dma;
 	return 0;
 
-dma_exit:
-	dma_exit(dev, dma);
+release_group:
+	/*
+	 * DMA init failed. Release ALL resources allocated inside this
+	 * group (dma memory, TX channel if already acquired, etc.) so
+	 * that a successful PIO-mode probe does not hold unused resources
+	 * for the entire device lifetime.
+	 */
+	devres_release_group(dev, group);
 	return ret;
 }
 

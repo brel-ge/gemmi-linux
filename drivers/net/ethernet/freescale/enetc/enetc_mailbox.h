@@ -42,8 +42,8 @@
 #define ENETC_PF_RC_IP_REVISION_INVALID		0xff
 
 /* Class-specific notification codes for link status */
-#define ENETC_PF_NC_LINK_STATUS_UP		0x0
-#define ENETC_PF_NC_LINK_STATUS_DOWN		0x1
+#define ENETC_PF_NC_LINK_STATUS_DOWN		BIT(0)
+#define ENETC_PF_NC_LINK_TX_PAUSE_ENABLE	BIT(1)
 
 /* Class-specific error return codes for VLAN filter */
 #define ENETC_PF_RC_VLAN_FILTER_INVALID_VLAN	0x0
@@ -99,10 +99,16 @@ enum enetc_msg_link_speed_val {
 	ENETC_MSG_SPEED_1000M,
 	ENETC_MSG_SPEED_2500M,
 	ENETC_MSG_SPEED_5G,
-	ENETC_MSG_SPEED_10G,
-	ENETC_MSG_SPEED_25G,
-	ENETC_MSG_SPEED_50G,
-	ENETC_MSG_SPEED_100G,
+	/* Do not add enumeration values for any speed greater than
+	 * 5Gbps. For any speed greater than 5Gbps, its speed class
+	 * code should follow the formula below.
+	 *
+	 * SPEED = (link_speed - 5000) / 1000 + ENETC_MSG_SPEED_5G
+	 *
+	 * The unit of link_speed should be Mbps, the max SPEED
+	 * should <= ENETC_MSG_SPEED_MAX.
+	 */
+	ENETC_MSG_SPEED_MAX = 0xff,
 };
 
 enum enetc_msg_vlan_filter_cmd_id {
@@ -171,13 +177,14 @@ struct enetc_msg_mac_hash_filter {
 	struct enetc_msg_header hdr;
 	u8 size:6;
 	u8 type:2;
-	u64 hash_tbl[];
+	u8 resv[3];
+	u32 hash_tbl[];
 };
 
 /* message format of class_id 0x20, cmd_id: 0x5,
  * set MAC promiscuous mode
  */
-struct enetc_msg_mac_promsic_mode {
+struct enetc_msg_mac_promisc_mode {
 	struct enetc_msg_header hdr;
 	u8 flush_macs:1;
 	u8 promisc_mode:1;
@@ -192,13 +199,13 @@ struct enetc_msg_vlan_hash_filter {
 	struct enetc_msg_header hdr;
 	u8 size;
 	u8 resv[3];
-	u64 hash_tbl[];
+	u32 hash_tbl[];
 };
 
 /* message format of class_id 0x21, cmd_id: 0x4,
  * set VLAN promiscuous mode
  */
-struct enetc_msg_vlan_promsic_mode {
+struct enetc_msg_vlan_promisc_mode {
 	struct enetc_msg_header hdr;
 	u8 flush_vlans:1;
 	u8 promisc_mode:1;

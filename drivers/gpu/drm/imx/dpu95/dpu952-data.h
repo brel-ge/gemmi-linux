@@ -40,6 +40,25 @@ static const struct dpu95_units dpu952_dpu_cfs = {
 	.hw_init	= dpu95_cf_hw_init,
 };
 
+/* Color Matrix */
+static const unsigned int dpu952_cm_ids[] = {0, 1, 4, 9};
+static const enum dpu95_unit_type dpu952_cm_types[] = {
+DPU95_DISP, DPU95_DISP, DPU95_DISP, DPU95_BLIT};
+static const unsigned long dpu952_cm_ofss[] = {
+0x2c0000, 0x350000, 0x230000, 0x60000};
+static const unsigned long dpu952_cm_aux_ofss[] = {0, 0, 0x231000, 0x61000};
+
+static const struct dpu95_units dpu952_dpu_cms = {
+	.ids		= dpu952_cm_ids,
+	.types		= dpu952_cm_types,
+	.ofss		= dpu952_cm_ofss,
+	.aux_ofss	= dpu952_cm_aux_ofss,
+	.cnt		= ARRAY_SIZE(dpu952_cm_ids),
+	.name		= DPU95_COLORMATRIX,
+	.init		= dpu95_cm_init,
+	.hw_init	= dpu95_cm_hw_init,
+};
+
 /* Domain Blend */
 static const unsigned int dpu952_db_ids[] = {0, 1};
 static const enum dpu95_unit_type dpu952_db_types[] = {DPU95_DISP, DPU95_DISP};
@@ -235,6 +254,7 @@ static const struct dpu95_units dpu952_dpu_vss = {
 
 static const struct dpu95_units *dpu952_all_units[] = {
 	&dpu952_dpu_cfs,
+	&dpu952_dpu_cms,
 	&dpu952_dpu_dbs,
 	&dpu952_dpu_dts,
 	&dpu952_dpu_eds,
@@ -390,6 +410,11 @@ enum dpu952_irq {
 
 static const unsigned long dpu952_unused_irq[] = {
 0x00000000, 0x00000000, 0xffe00000};
+
+static int dpu952_get_platform_irq_num(int irq)
+{
+	return irq;
+}
 
 static enum dpu952_irq dpu952_comctrl_irq[] = {
 	DPU952_IRQ_COMCTRL_SW0,
@@ -611,6 +636,7 @@ static const struct dpu95_data dpu952_data = {
 
 	.irq_cnt = DPU952_IRQ_CNT,
 	.unused_irq = dpu952_unused_irq,
+	.get_platform_irq_num = dpu952_get_platform_irq_num,
 
 	.comctrl_irq = (int *)dpu952_comctrl_irq,
 	.comctrl_irq_cnt = ARRAY_SIZE(dpu952_comctrl_irq),
