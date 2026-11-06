@@ -56,6 +56,7 @@
 #include "gc_hal_kernel_platform.h"
 #include "gc_hal_kernel_device.h"
 #include "gc_hal_driver.h"
+#include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/pm_qos.h>
 #include <linux/module.h>
@@ -1294,7 +1295,11 @@ static int patch_param(struct platform_device *pdev,
 
         /* Only iterate through table if it has an even number of entries */
         if (entries % 2 == 0) {
-            unsigned long system_memory = memblock_phys_mem_size();
+            /*
+             * memblock_phys_mem_size() is not exported and the memblock
+             * data is gone after boot, so it cannot be used by the module.
+             */
+            unsigned long system_memory = get_num_physpages() << PAGE_SHIFT;
             int i;
 
             /*
